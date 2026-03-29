@@ -308,6 +308,45 @@ def render_profile_facets(items: list[dict[str, str]]) -> str:
     return "".join(parts)
 
 
+def render_external_source_cards(items: list[dict[str, object]]) -> str:
+    if not items:
+        return render_empty_state("No external public sources available.")
+
+    parts: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title", "")).strip()
+        summary = str(item.get("summary", "")).strip()
+        icon = str(item.get("icon", "")).strip() or "book"
+        meta = item.get("meta", [])
+        if not isinstance(meta, list):
+            meta = []
+        url = str(item.get("url", "")).strip()
+        parts.append(
+            '<article class="rounded-[1.75rem] border border-stone-200 bg-stone-50 p-5">'
+            '<div class="flex items-start gap-4">'
+            f'{render_icon_token(icon, title)}'
+            '<div class="min-w-0 flex-1">'
+            f'<h3 class="text-base font-semibold text-stone-900">{clean_inline(title)}</h3>'
+            f'<p class="mt-2 text-sm leading-7 text-stone-600">{clean_inline(summary)}</p>'
+        )
+        if meta:
+            parts.append('<div class="mt-3 flex flex-wrap gap-2">')
+            for entry in meta:
+                parts.append(
+                    f'<span class="rounded-full bg-white px-3 py-1 text-xs text-stone-600">{clean_inline(str(entry))}</span>'
+                )
+            parts.append("</div>")
+        if url:
+            safe_url = html.escape(url, quote=True)
+            parts.append(
+                f'<a href="{safe_url}" target="_blank" rel="noreferrer" class="mt-4 inline-flex text-sm font-medium text-amber-700 hover:text-amber-800">查看原始链接</a>'
+            )
+        parts.append("</div></div></article>")
+    return "".join(parts) if parts else render_empty_state("No external public sources available.")
+
+
 def render_work_history(note: str, header: list[str], rows: list[list[str]], gaps: list[str]) -> str:
     parts: list[str] = []
 
@@ -846,6 +885,7 @@ def build_render_profile_from_markdown(
         "public_summary": dedupe_strings(hero_points),
         "capability_cards": capability_cards,
         "project_cards": project_cards,
+        "external_source_cards": [],
         "work_history": {
             "note": work_note,
             "header": work_table_header,
@@ -880,6 +920,7 @@ def merge_render_profile(
         "public_summary",
         "capability_cards",
         "project_cards",
+        "external_source_cards",
     ):
         value = preferred.get(key)
         if not value:
@@ -932,6 +973,9 @@ def build_site_payload(persona_vault_path: Path, site_title: str | None) -> dict
         "KEYWORD_CHIPS": render_keyword_chips(list(render_profile.get("keyword_chips", []))),
         "CURRENT_FOCUS": render_list(list(render_profile.get("focus_items", []))),
         "WORK_STYLE": render_list(list(render_profile.get("work_style_items", []))),
+        "EXTERNAL_SOURCE_CARDS": render_external_source_cards(
+            list(render_profile.get("external_source_cards", []))
+        ),
         "VALUE_CARDS": render_value_cards(list(render_profile.get("value_cards", []))),
         "WORK_HISTORY": render_work_history(
             str(work_history.get("note", "")),

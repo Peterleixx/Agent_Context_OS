@@ -66,6 +66,62 @@ class FakeOpener:
 
 
 class PersonaVaultGeneratorAppTest(unittest.TestCase):
+    def test_extract_github_owner_from_supported_urls(self):
+        module = load_generator_module()
+
+        self.assertEqual(module.extract_github_owner("https://github.com/openai"), "openai")
+        self.assertEqual(module.extract_github_owner("https://github.com/openai/codex"), "openai")
+        self.assertEqual(module.extract_github_owner("https://github.com/openai/"), "openai")
+        self.assertIsNone(module.extract_github_owner("https://example.com/openai"))
+
+    def test_collect_github_public_data_summarizes_profile_and_repos(self):
+        module = load_generator_module()
+
+        responses = {
+            "https://api.github.com/users/openai": {
+                "login": "openai",
+                "name": "OpenAI",
+                "bio": "AI research and deployment company.",
+                "blog": "https://openai.com",
+                "public_repos": 12,
+                "followers": 999,
+                "following": 1,
+            },
+            "https://api.github.com/users/openai/repos?per_page=6&sort=updated": [
+                {
+                    "name": "codex",
+                    "html_url": "https://github.com/openai/codex",
+                    "description": "Codex CLI and app.",
+                    "language": "Python",
+                    "stargazers_count": 4200,
+                    "fork": False,
+                },
+                {
+                    "name": "evals",
+                    "html_url": "https://github.com/openai/evals",
+                    "description": "Evaluation framework.",
+                    "language": "Python",
+                    "stargazers_count": 3800,
+                    "fork": False,
+                },
+            ],
+        }
+
+        def fake_fetch_json(url):
+            return responses[url]
+
+        data = module.collect_github_public_data(
+            [{"kind": "github", "url": "https://github.com/openai"}],
+            fetch_json=fake_fetch_json,
+        )
+
+        self.assertEqual(len(data), 1)
+        profile = data[0]
+        self.assertEqual(profile["owner"], "openai")
+        self.assertEqual(profile["profile"]["name"], "OpenAI")
+        self.assertEqual(profile["top_languages"], ["Python"])
+        self.assertEqual(profile["repositories"][0]["name"], "codex")
+
     def test_parse_args_supports_open_browser_flag(self):
         module = load_generator_module()
 
@@ -176,6 +232,33 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
         self.assertIn("核心能力总览", prompt)
         self.assertIn('"target_scene": "job_jd"', prompt)
         self.assertIn("岗位/JD", prompt)
+
+    def test_generation_prompt_mentions_github_public_data_when_present(self):
+        module = load_generator_module()
+        repo_root = Path(__file__).resolve().parents[1]
+
+        prompt = module.build_generation_prompt(
+            repo_root,
+            {
+                "agents": ["codex"],
+                "path_mappings": [],
+                "links": [{"kind": "github", "url": "https://github.com/openai"}],
+                "github_public_data": [
+                    {
+                        "owner": "openai",
+                        "profile_url": "https://github.com/openai",
+                        "profile": {"name": "OpenAI", "bio": "AI company"},
+                        "repositories": [{"name": "codex", "url": "https://github.com/openai/codex"}],
+                        "top_languages": ["Python"],
+                    }
+                ],
+            },
+            Path("/tmp/workdir"),
+        )
+
+        self.assertIn("github_public_data", prompt)
+        self.assertIn("OpenAI", prompt)
+        self.assertIn("codex", prompt)
 
     def test_build_edit_prompt_mentions_vault_and_render_profile_sync(self):
         module = load_generator_module()

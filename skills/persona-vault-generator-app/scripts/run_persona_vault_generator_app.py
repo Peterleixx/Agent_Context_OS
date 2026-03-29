@@ -16,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 
 DEFAULT_JOB_MESSAGE = "正在调用本机 Codex 执行 PersonaVault 生成任务"
@@ -95,6 +96,104 @@ def parse_codex_output_lines(lines: list[str]) -> list[dict[str, Any]]:
         if isinstance(parsed, dict):
             events.append(parsed)
     return events
+
+
+def extract_github_owner(url: str) -> str | None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    if parsed.netloc.lower() not in {"github.com", "www.github.com"}:
+        return None
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if not path_parts:
+        return None
+    owner = path_parts[0].strip()
+    return owner or None
+
+
+def fetch_json_from_url(url: str) -> Any:
+    request = Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "PersonaVaultGeneratorApp/1.0",
+        },
+    )
+    with urlopen(request) as response:  # noqa: S310
+        return json.loads(response.read().decode("utf-8"))
+
+
+def collect_github_public_data(
+    profile_links: list[dict[str, Any]],
+    fetch_json: Any = fetch_json_from_url,
+) -> list[dict[str, Any]]:
+    collected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in profile_links:
+        if str(item.get("kind", "")).strip() != "github":
+            continue
+        url = str(item.get("url", "")).strip()
+        owner = extract_github_owner(url)
+        if not owner or owner in seen:
+            continue
+        seen.add(owner)
+        try:
+            profile = fetch_json(f"https://api.github.com/users/{owner}")
+            repositories = fetch_json(
+                f"https://api.github.com/users/{owner}/repos?per_page=6&sort=updated"
+            )
+        except Exception:
+            continue
+        if not isinstance(profile, dict) or not isinstance(repositories, list):
+            continue
+
+        cleaned_repositories: list[dict[str, Any]] = []
+        languages: list[str] = []
+        for repo in repositories:
+            if not isinstance(repo, dict) or repo.get("fork"):
+                continue
+            language = str(repo.get("language", "")).strip()
+            if language and language not in languages:
+                languages.append(language)
+            cleaned_repositories.append(
+                {
+                    "name": str(repo.get("name", "")).strip(),
+                    "url": str(repo.get("html_url", "")).strip(),
+                    "description": str(repo.get("description", "") or "").strip(),
+                    "language": language,
+                    "stars": int(repo.get("stargazers_count", 0) or 0),
+                }
+            )
+
+        collected.append(
+            {
+                "owner": owner,
+                "profile_url": f"https://github.com/{owner}",
+                "profile": {
+                    "login": str(profile.get("login", "")).strip(),
+                    "name": str(profile.get("name", "") or "").strip(),
+                    "bio": str(profile.get("bio", "") or "").strip(),
+                    "blog": str(profile.get("blog", "") or "").strip(),
+                    "public_repos": int(profile.get("public_repos", 0) or 0),
+                    "followers": int(profile.get("followers", 0) or 0),
+                    "following": int(profile.get("following", 0) or 0),
+                },
+                "repositories": cleaned_repositories[:4],
+                "top_languages": languages[:4],
+            }
+        )
+    return collected
+
+
+def enrich_payload_with_github_data(payload: dict[str, Any]) -> dict[str, Any]:
+    enriched = dict(payload)
+    links = payload.get("links", [])
+    if not isinstance(links, list):
+        links = []
+    if enriched.get("github_public_data"):
+        return enriched
+    enriched["github_public_data"] = collect_github_public_data(links)
+    return enriched
 
 
 def build_codex_command(output_last_message_path: Path) -> list[str]:
@@ -177,12 +276,16 @@ def normalize_payload(payload: dict[str, Any], working_directory: Path) -> dict[
         if str(item.get("kind", "")).strip() and str(item.get("url", "")).strip()
     ]
     output_dir = str(payload.get("output_dir", "")).strip()
+    github_public_data = payload.get("github_public_data", [])
+    if not isinstance(github_public_data, list):
+        github_public_data = []
     return {
         "agents": [str(agent).strip() for agent in payload.get("agents", []) if str(agent).strip()],
         "workspace_dirs": grouped["workspace_dirs"],
         "source_dirs": grouped["source_dirs"],
         "chat_override_paths": grouped["chat_override_paths"],
         "profile_links": links,
+        "github_public_data": github_public_data,
         "output_dir": output_dir or str((working_directory / "PersonaVault").resolve()),
         "advanced_settings": normalize_advanced_settings(payload.get("advanced_settings")),
     }
@@ -209,9 +312,10 @@ def build_generation_prompt(repo_root: Path, payload: dict[str, Any], working_di
         "- `render-profile.json` MUST include: `generation_context`, `profile_facets`, `keyword_chips`, `focus_items`, `work_style_items`, `value_cards`, `capability_metrics`, `project_capability_matrix`, and `public_summary`.\n"
         "- Every capability metric in `render-profile.json` MUST have `icon`, `title`, `short_title`, `judgment`, `confidence`, and `score`.\n"
         "- `profile_facets` are for key profile icon cards and every item MUST have `icon`, `title`, and `summary`.\n"
+        "- If `github_public_data` is present, use it as authorized external evidence and reflect it in source map, project summaries, and render-profile external source cards.\n"
         "- Use the selected agents and local paths as authorized sources.\n"
         "- The target scene for this run is 岗位/JD unless the structured input says otherwise.\n"
-        "- External links are reference-only; do not fetch network content.\n"
+        "- External links are reference-only; do not fetch additional network content beyond the pre-fetched GitHub public data in the structured input.\n"
         "- If the output directory already exists, refresh conservatively instead of deleting cards.\n"
         "- Default to Markdown-first output that Obsidian can open directly.\n\n"
         "Structured input JSON:\n"
@@ -338,7 +442,9 @@ class CodexPersonaJobRunner:
 
     def _enhance_persona_vault(self, vault_path: Path, payload: dict[str, Any]) -> dict[str, Any]:
         renderer_module = load_renderer_module(self.repo_root)
-        advanced_settings = normalize_payload(payload, self.working_directory)["advanced_settings"]
+        normalized = normalize_payload(payload, self.working_directory)
+        advanced_settings = normalized["advanced_settings"]
+        github_public_data = normalized.get("github_public_data", [])
         fallback_profile = renderer_module.build_render_profile_from_markdown(
             vault_path,
             advanced_settings,
@@ -347,10 +453,95 @@ class CodexPersonaJobRunner:
             renderer_module.load_render_profile_if_exists(vault_path),
             fallback_profile,
         )
+        render_profile["external_source_cards"] = self._build_external_source_cards(github_public_data)
         self._ensure_profile_support_files(vault_path, render_profile)
         self._ensure_capability_map_table(vault_path, render_profile)
+        self._write_github_source_map(vault_path, github_public_data)
         self._write_render_profile_json(vault_path, render_profile)
         return render_profile
+
+    def _build_external_source_cards(
+        self,
+        github_public_data: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        cards: list[dict[str, Any]] = []
+        for item in github_public_data:
+            if not isinstance(item, dict):
+                continue
+            profile = item.get("profile", {})
+            if not isinstance(profile, dict):
+                profile = {}
+            name = str(profile.get("name", "") or item.get("owner", "")).strip()
+            bio = str(profile.get("bio", "") or "").strip()
+            languages = item.get("top_languages", [])
+            if not isinstance(languages, list):
+                languages = []
+            repos = item.get("repositories", [])
+            if not isinstance(repos, list):
+                repos = []
+            repo_names = [str(repo.get("name", "")).strip() for repo in repos if isinstance(repo, dict)]
+            meta = []
+            if item.get("owner"):
+                meta.append(f"owner: {item['owner']}")
+            if languages:
+                meta.append(f"languages: {', '.join(str(language) for language in languages[:3])}")
+            if repo_names:
+                meta.append(f"repos: {', '.join(name for name in repo_names[:3] if name)}")
+            cards.append(
+                {
+                    "icon": "book",
+                    "title": "GitHub 公开资料",
+                    "summary": bio or f"{name} 的公开主页与代表仓库摘要。",
+                    "meta": meta,
+                    "url": str(item.get("profile_url", "")).strip(),
+                }
+            )
+        return cards
+
+    def _write_github_source_map(
+        self,
+        vault_path: Path,
+        github_public_data: list[dict[str, Any]],
+    ) -> None:
+        if not github_public_data:
+            return
+        source_map_dir = vault_path / "07 - Source Map"
+        source_map_dir.mkdir(parents=True, exist_ok=True)
+        lines = ["# GitHub公开资料", ""]
+        for item in github_public_data:
+            if not isinstance(item, dict):
+                continue
+            owner = str(item.get("owner", "")).strip()
+            profile = item.get("profile", {})
+            if not isinstance(profile, dict):
+                profile = {}
+            lines.append(f"## {owner or 'github-profile'}")
+            lines.append("")
+            if item.get("profile_url"):
+                lines.append(f"- 链接: {item['profile_url']}")
+            if profile.get("name"):
+                lines.append(f"- 名称: {profile['name']}")
+            if profile.get("bio"):
+                lines.append(f"- 简介: {profile['bio']}")
+            languages = item.get("top_languages", [])
+            if isinstance(languages, list) and languages:
+                lines.append(f"- 主要语言: {', '.join(str(language) for language in languages[:4])}")
+            repositories = item.get("repositories", [])
+            if isinstance(repositories, list) and repositories:
+                lines.append("- 代表仓库:")
+                for repo in repositories[:4]:
+                    if not isinstance(repo, dict):
+                        continue
+                    repo_name = str(repo.get("name", "")).strip()
+                    repo_desc = str(repo.get("description", "")).strip()
+                    repo_lang = str(repo.get("language", "")).strip()
+                    repo_stars = int(repo.get("stars", 0) or 0)
+                    detail = " / ".join(
+                        part for part in [repo_desc, repo_lang, f"stars {repo_stars}" if repo_stars else ""] if part
+                    )
+                    lines.append(f"  - {repo_name}" + (f": {detail}" if detail else ""))
+            lines.append("")
+        (source_map_dir / "GitHub公开资料.md").write_text("\n".join(lines), encoding="utf-8")
 
     def _refresh_persona_outputs(
         self,
@@ -500,6 +691,9 @@ class CodexPersonaJobRunner:
 
     def _run_job(self, job_id: str, payload: dict[str, Any]) -> None:
         self._update_job(job_id, stage="discovering_sources", message="正在整理输入来源。")
+        payload = enrich_payload_with_github_data(payload)
+        if normalize_payload(payload, self.working_directory).get("github_public_data"):
+            self._update_job(job_id, stage="discovering_sources", message="正在抓取 GitHub 公开资料。")
         prompt = build_generation_prompt(self.repo_root, payload, self.working_directory)
         self._update_job(job_id, stage="preparing_prompt", message="正在整理 Codex 生成指令。")
 
