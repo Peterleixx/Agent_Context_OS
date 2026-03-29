@@ -1,6 +1,6 @@
 ---
 name: build-persona-vault
-description: Use when creating, refreshing, or repairing a local PersonaVault from authorized files, especially for 人物画像, 能力卡片, 项目卡片, 证据卡片, or Obsidian-friendly Markdown-first personal context knowledge bases.
+description: Use when creating, refreshing, or repairing a local PersonaVault from authorized local files, agent chat transcripts, and optional profile links, especially for 人物画像, 能力卡片, 项目卡片, or 证据卡片
 ---
 
 # Build Persona Vault
@@ -8,53 +8,124 @@ description: Use when creating, refreshing, or repairing a local PersonaVault fr
 ## 何时使用
 
 - 第一次初始化 `PersonaVault`
-- 用户新增了一批本地资料，需要增量整理
-- 需要把零散文档整理成 `人物画像 / 能力卡片 / 项目卡片 / 证据卡片`
-- 需要生成一个能被 `Obsidian` 直接打开的人物知识库，而不是一堆 JSON
+- 用户希望先通过 `Codex` 或其他 Agent 的本地聊天记录生成主要人物画像
+- 需要把零散资料整理成 `人物画像 / 能力卡片 / 项目卡片 / 证据卡片`
+- 需要生成一个能被 `Obsidian` 直接打开的 `Markdown-first` 知识库
+- 需要在聊天记录之外，再用工作区资料、仓库资料或个人链接补强证据链
 
 ## 不适合使用
 
 - 用户只是想回答一个临时问题，不需要持久化知识库
-- 用户没有给出明确的授权目录
+- 用户没有授权任何本地来源
+- 用户只给了外部链接，但没有授权本地聊天记录或本地资料
 - 用户希望直接做岗位匹配结果，而不是先整理底层知识库
 
 ## 核心目标
 
-把授权范围内的原始资料，编译成一个 `Markdown-first` 的 `PersonaVault`：
+把授权范围内的原始资料编译成一个 `Markdown-first` 的 `PersonaVault`，并把“基于聊天记录输出主要人物画像”作为默认主路径：
 
+- 默认先围绕所选 `agent` 的本地聊天记录生成 `00 - Profile/主要人物画像.md`
+- 再用工作区资料、本地文档和可选外部链接补强能力、项目和证据卡
 - 人类能直接阅读和修改
 - Agent 能基于这些卡片稳定检索和输出
 - 证据与能力之间有明确链接
 - 敏感内容默认保守处理
 
+## 默认工作方式
+
+- 如果任务目标包含 `人物画像 / About Me / Profile`，优先要求 `chat_agent` 或 `chat_transcript_sources`
+- 用户只要告诉你需要哪个 `agent`，先尝试按默认本地路径自动发现聊天记录
+- 只有在默认路径探测失败时，才回退为要求用户补充明确的聊天记录路径
+- `workspace_dirs`、`source_dirs`、`profile_links` 都是可选增强项，不是第一版人物画像的硬前置条件
+- 如果没指定 `persona_vault_path`，默认把输出写到当前工作目录，不要自行创建同级的额外根目录
+
 ## 输入契约
 
 在开始前确认以下输入：
 
+- `chat_agent`
+  - 当任务包含 `人物画像 / About Me / Profile` 时默认必需
+  - 用户只需提供 agent 名称，例如：`codex`、`claude-code`
+- `chat_transcript_sources`
+  - 已授权的聊天记录文件或目录
+  - 支持 `md`, `txt`, `json`, `jsonl`
+  - 是覆盖默认探测规则的手工输入；如果已经给了，就优先使用
 - `source_dirs`
-  - 已授权的本地目录列表
+  - 可选
+  - 已授权的本地资料目录列表
+- `workspace_dirs`
+  - 可选
+  - 已授权的工作区目录或仓库目录
+  - 用于补充项目、代码上下文和工作主题
+- `profile_links`
+  - 可选
+  - `GitHub`, `LinkedIn`, 个人网站、博客、作品集等链接
+  - 如果没有明确授权联网抓取，则只记录链接，不自动抓取网页正文
 - `persona_vault_path`
-  - 输出目录
+  - 可选
+  - 输出目录；默认是当前工作目录
 - `include_types`
-  - 默认支持：`md`, `txt`, `pdf`, `docx`, `readme`
+  - 默认支持：`md`, `txt`, `pdf`, `docx`, `readme`, `json`, `jsonl`
 - `mode`
   - `init`：第一次构建
   - `refresh`：增量更新
 
-如果缺少授权目录或输出目录，先返回 `待补输入项`，不要自己猜路径。
+如果任务目标包含 `人物画像 / About Me / Profile`，但既没有 `chat_agent` 也没有 `chat_transcript_sources`，先返回 `待补输入项`，不要自己猜 agent。
+
+如果用户已经给出 `chat_agent`，应先按默认路径探测；只有在默认路径下找不到至少 `1` 份本地聊天记录时，才返回 `待补输入项`。
+
+## 支持的 Agent 聊天记录
+
+### `codex`
+
+默认优先探测以下本地来源：
+
+- `~/.codex/sessions/**/*.jsonl`
+- `~/.codex/archived_sessions/**/*.jsonl`
+- `~/.codex/session_index.jsonl`
+
+可选补充来源：
+
+- `~/.codex/logs_*.sqlite`
+
+使用规则：
+
+- 至少要纳入 `1` 份本地会话文件
+- 优先提取 `session_meta`、`message`、会话时间、`cwd`、线程名或会话 ID
+- 对 `session_index.jsonl` 这类索引文件，只把它当会话发现和映射辅助，不把它单独当成人物画像证据正文
+
+### `claude-code`
+
+默认优先探测以下本地来源：
+
+- `~/.claude/projects/**/*.jsonl`
+
+如果用户给了 `workspace_dirs`，优先在与工作区路径对应的子目录中找会话文件。
+
+使用规则：
+
+- 如果本机不存在 `~/.claude` 或不存在任何会话文件，不要猜别的隐藏路径
+- 直接返回 `待补输入项`，说明已尝试默认路径，并要求用户补充授权路径或确认本机确实有本地聊天记录
+
+### 其他 Agent
+
+- 可以扩展，但不要编造默认路径
+- 如果不是已知 agent，要求用户明确给出本地聊天记录文件或目录
 
 ## 输出契约
 
 至少产出以下内容：
 
 - `Home.md`
-- `00 - Profile/`
+- `00 - Profile/主要人物画像.md`
 - `01 - Capabilities/`
 - `02 - Projects/`
 - `03 - Evidence/`
 - `04 - Policies/`
 - `07 - Source Map/`
 - `08 - Audit/`
+
+如果用户没有指定 `persona_vault_path`，以上文件和目录默认都创建在当前工作目录下。
 
 机器缓存和增量状态只放 `.persona-system/`，不要污染人类视角。
 
@@ -65,33 +136,79 @@ description: Use when creating, refreshing, or repairing a local PersonaVault fr
 1. `Markdown first`
    - 对人可见层尽量全部使用 `.md`
 2. `证据先于结论`
-   - 没有证据的能力不能写成确定事实
+   - 没有证据的能力或画像结论不能写成确定事实
 3. `保守提炼`
    - 资料不足时写“资料不足”或“证据不足”，不要补幻觉
 4. `来源可追溯`
-   - 每张证据卡片都要能回到来源路径或来源映射 ID
+   - 每张证据卡片都要能回到来源路径、来源映射 ID，或可定位的会话文件
 5. `刷新不覆盖人工编辑`
    - `refresh` 模式下，优先更新索引、证据引用和新增内容，不要静默重写人工补充的正文
+6. `聊天记录是一等来源，并且是人物画像主入口`
+   - 构建人物画像时，必须先纳入所选 agent 的本地聊天记录
+   - 聊天记录可以支撑“自我表述、偏好、决策方式、项目复盘、能力线索、当前关注主题”
+   - 但聊天记录不能单独覆盖正式文档证据
+7. `区分自述 / 推断 / 已验证事实`
+   - 聊天记录中的自我描述标记为“来自对话自述”
+   - 跨多轮、多会话稳定出现但缺少外部佐证的模式标记为“来自对话推断”
+   - 只有被工作区资料、项目材料或其他可靠来源支持时，才能升级为“已验证事实”
+8. `外部链接只做可选补强`
+   - `GitHub`, `LinkedIn`, 个人网站等链接只能做补强或引用入口
+   - 如果未授权联网抓取，只记录链接和用途，不要把链接内容写成已验证事实
+9. `默认输出到当前工作目录`
+   - 用户未指定路径时，不要擅自改成别的目录名
 
 ## 标准流程
 
-1. 建立来源清单
-   - 扫描授权目录
+1. 确定输出根目录和授权范围
+   - 若未指定 `persona_vault_path`，使用当前工作目录
+   - 记录已授权的 `source_dirs`、`workspace_dirs`、`profile_links`
+2. 确定聊天记录来源
+   - 如果给了 `chat_transcript_sources`，优先使用
+   - 否则按 `chat_agent` 的默认本地路径自动探测
+   - 必须确认至少存在 `1` 份本地聊天记录
+3. 建立来源清单
+   - 扫描授权目录与聊天记录
    - 过滤支持的文件类型
    - 为每个来源生成唯一来源 ID
-2. 提取基础事实
+4. 先提取人物画像线索
+   - 从聊天记录中提取：自我定位、偏好、决策风格、常提及项目、反复出现的能力表达、约束与原则、代表性工作区
+   - 优先生成 `00 - Profile/主要人物画像.md`
+5. 再提取基础事实
    - 经历、角色、项目、产出、合作对象、时间线、能力线索
-3. 聚合成少量能力主题
+   - 结合 `workspace_dirs` 内的代码、文档或说明材料做交叉验证
+6. 聚合成少量能力主题
    - 首版优先压缩成 `3-8` 张核心能力卡片
    - 不要生成几十张稀碎标签卡
-4. 为每个能力绑定关键证据
+7. 为每个能力绑定关键证据
    - 每张能力卡优先绑定 `1-3` 条高价值证据
-5. 生成项目卡片
-   - 把高频出现、信息完整的项目单独成卡
-6. 生成默认披露规则草稿
+   - 如果聊天记录提供了关键线索，至少选取 `1` 条高价值对话证据进入人物画像或核心能力卡
+8. 生成项目卡片
+   - 把高频出现、信息完整的项目或工作区单独成卡
+9. 生成默认披露规则草稿
    - 先保守，不自动暴露公司名、内部指标、敏感合作方
-7. 写入 `PersonaVault`
+10. 写入 `PersonaVault`
    - 同时更新来源映射和处理日志
+   - 在来源映射中明确标注哪些卡片引用了聊天记录证据、工作区证据和外部链接
+
+## 主要人物画像写法要求
+
+`00 - Profile/主要人物画像.md` 至少要包含：
+
+- `当前角色定位`
+- `稳定偏好与决策风格`
+- `当前关注主题`
+- `代表性项目 / 工作区`
+- `核心对话证据`
+- `已验证事实`
+- `来自对话自述`
+- `来自对话推断`
+- `可对外表述`
+
+写作要求：
+
+- 至少有 `1` 条核心画像结论回链到本地聊天记录证据
+- 不要把一次性的情绪、玩笑或上下文噪音写成稳定画像
+- 如果聊天记录主要反映当前阶段，而非长期稳定特征，要显式标明“阶段性信号”
 
 ## 卡片写法要求
 
@@ -103,6 +220,8 @@ description: Use when creating, refreshing, or repairing a local PersonaVault fr
 - `关键证据`
 - `可对外表述`
 
+如果能力判断明显受聊天记录影响，应在 `关键证据` 中显式标注至少一条 `对话证据`。
+
 模板见 [templates/能力卡片模板.md](templates/能力卡片模板.md)。
 
 ### 证据卡片必须包含
@@ -113,6 +232,18 @@ description: Use when creating, refreshing, or repairing a local PersonaVault fr
 - `敏感级别`
 - `支撑能力`
 
+当证据来自聊天记录时：
+
+- `来源类型` 写为 `chat_transcript`
+- `证据摘要` 要保留足够上下文，避免只摘一句空话
+- 尽量记录会话文件、时间、发言角色、工作区或消息片段定位信息
+
+当证据来自外部链接时：
+
+- `来源类型` 写为 `external_profile_link`
+- 明确标注是“链接入口”还是“已抓取摘要”
+- 未授权联网时不要假装已经抓取过正文
+
 模板见 [templates/证据卡片模板.md](templates/证据卡片模板.md)。
 
 ## `init` 与 `refresh` 的处理差异
@@ -120,8 +251,9 @@ description: Use when creating, refreshing, or repairing a local PersonaVault fr
 ### `init`
 
 - 可以完整创建目录和基础卡片
-- 缺资料时也要生成最小 `Home.md` 和 `About Me.md`
+- 缺资料时也要生成最小 `Home.md` 和 `00 - Profile/主要人物画像.md`
 - 明确标注哪些部分仍待补资料
+- 如果目标包含 `人物画像`，优先使用聊天记录生成保守初稿
 
 ### `refresh`
 
@@ -131,6 +263,7 @@ description: Use when creating, refreshing, or repairing a local PersonaVault fr
   - 更新来源计数
   - 更新证据链接
   - 补充“最近更新”摘要
+- 新聊天记录优先作为新增证据追加，不要因为新的对话表述就覆盖人工整理后的稳定结论
 - 不要因为本轮扫描结果变化就删除旧卡片，除非用户明确要求重建
 
 ## 最小产出标准
@@ -138,7 +271,7 @@ description: Use when creating, refreshing, or repairing a local PersonaVault fr
 即使资料较少，也应尽量生成：
 
 - `Home.md`
-- `00 - Profile/About Me.md`
+- `00 - Profile/主要人物画像.md`
 - `01 - Capabilities/能力地图.md`
 - 至少 `1` 张能力卡
 - 至少 `1` 张证据卡
@@ -150,9 +283,18 @@ description: Use when creating, refreshing, or repairing a local PersonaVault fr
 - 没有足够资料：
   - 只生成最小 `Profile`
   - 在 `Home.md` 标出“资料不足”
+- 构建人物画像但没有 `chat_agent` 且没有 `chat_transcript_sources`：
+  - 返回 `待补输入项`
+  - 明确说明“聊天记录是人物画像的主输入，当前缺失”
+- 已给出 `chat_agent`，但默认路径下没有发现任何本地聊天记录：
+  - 返回 `待补输入项`
+  - 明确写出已经尝试的默认路径
 - 某类文件无法解析：
   - 记录到 `08 - Audit/处理日志.md`
   - 不中断整次构建
+- 只有外部链接，没有本地聊天记录：
+  - 可以记录链接入口
+  - 但不要宣称主要人物画像已完成
 - 来源过于敏感且无法安全归类：
   - 保留在来源映射中
   - 不进入能力卡片和项目卡片
@@ -162,14 +304,17 @@ description: Use when creating, refreshing, or repairing a local PersonaVault fr
 - 以“知识库卡片”风格写作，不要写成长报告
 - 多用短段落、表格和双链
 - 避免空泛表述，例如“综合能力强”“沟通能力较好”
-- 每条能力都尽量落到具体场景或行为
+- 每条能力和画像结论都尽量落到具体场景或行为
 
 ## 完成检查
 
 完成前确认：
 
 - `PersonaVault` 结构齐全
+- `00 - Profile/主要人物画像.md` 已生成
 - 能力卡片能回链到证据卡片
 - 证据卡片能追溯到来源
 - 人类直接在 `Obsidian` 中能读懂
 - 没有证据的判断都已降级表述
+- 若本轮包含人物画像构建，至少有一处核心画像结论能回链到本地聊天记录证据
+- 若使用了 `workspace_dirs` 或 `profile_links`，来源映射中已明确标注其作用和边界

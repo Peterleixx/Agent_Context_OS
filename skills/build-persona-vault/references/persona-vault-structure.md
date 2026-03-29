@@ -2,12 +2,15 @@
 
 `PersonaVault` 的目标不是做数据库导出目录，而是做一个人和 Agent 都能使用的 `Markdown-first` 知识库。
 
+如果用户没有指定输出目录，默认就在当前工作目录下创建这套结构。
+
 ## 推荐目录
 
 ```text
 PersonaVault/
   Home.md
   00 - Profile/
+    主要人物画像.md
     About Me.md
     Work History.md
     Current Focus.md
@@ -52,7 +55,7 @@ PersonaVault/
 - `Home.md`
   - 人类入口页，说明当前知识库概况、更新时间、待补资料
 - `00 - Profile/`
-  - 稳定的人物画像
+  - 稳定的人物画像；`主要人物画像.md` 应作为默认主入口
 - `01 - Capabilities/`
   - 按能力主题组织的核心卡片
 - `02 - Projects/`
@@ -82,7 +85,7 @@ PersonaVault/
 如果资料有限，也至少保留：
 
 - `Home.md`
-- `00 - Profile/About Me.md`
+- `00 - Profile/主要人物画像.md`
 - `01 - Capabilities/能力地图.md`
 - `03 - Evidence/证据总表.md`
 - `04 - Policies/场景规则-岗位匹配.md`

@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PersonaVault Generator</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body class="min-h-screen bg-[radial-gradient(circle_at_top,_#fef3c7,_#fafaf9_38%,_#e7e5e4_100%)] text-stone-900">
+    <main class="mx-auto max-w-6xl px-6 py-10 md:px-10">
+      <section class="rounded-[2rem] border border-stone-200/70 bg-white/90 p-8 shadow-[0_30px_90px_rgba(28,25,23,0.08)] backdrop-blur md:p-10">
+        <div class="grid gap-8 lg:grid-cols-[1.1fr_0.9fr]">
+          <div>
+            <p class="text-xs font-semibold uppercase tracking-[0.38em] text-amber-700">Local Codex Orchestrator</p>
+            <h1 class="mt-4 text-4xl font-semibold tracking-tight md:text-5xl">PersonaVault 本地交互式生成器</h1>
+            <p class="mt-5 max-w-2xl text-sm leading-7 text-stone-600">
+              通过本机 Codex CLI 读取聊天记录、本地路径映射和外部链接，生成完整 PersonaVault，并在完成后导出静态网页预览，再保留 Obsidian 打开入口。
+            </p>
+            <div class="mt-6 flex flex-wrap gap-3 text-xs text-stone-600">
+              <span class="rounded-full border border-stone-200 bg-stone-50 px-3 py-1">gpt-5.4</span>
+              <span class="rounded-full border border-stone-200 bg-stone-50 px-3 py-1">reasoning: medium</span>
+              <span class="rounded-full border border-stone-200 bg-stone-50 px-3 py-1">local codex exec</span>
+            </div>
+          </div>
+          <aside class="rounded-[1.75rem] border border-stone-200 bg-stone-50 p-6">
+            <div class="text-sm font-medium text-stone-900">默认来源规则</div>
+            <ul class="mt-4 space-y-3 text-sm leading-7 text-stone-600">
+              <li><span class="font-medium text-stone-800">Codex:</span> `~/.codex/sessions/**/*.jsonl` 与 `~/.codex/archived_sessions/**/*.jsonl`</li>
+              <li><span class="font-medium text-stone-800">Claude Code:</span> `~/.claude/projects/**/*.jsonl`</li>
+              <li><span class="font-medium text-stone-800">外部链接:</span> 只记录为来源，不自动联网抓取</li>
+              <li><span class="font-medium text-stone-800">默认输出:</span> 当前工作目录下的 `PersonaVault/`</li>
+            </ul>
+          </aside>
+        </div>
+      </section>
+
+      <section class="mt-8 grid gap-8 lg:grid-cols-[1.25fr_0.75fr]">
+        <form id="generator-form" class="rounded-[2rem] border border-stone-200 bg-white/92 p-7 shadow-sm">
+          <div class="flex items-center justify-between">
+            <div>
+              <div class="text-xs font-semibold uppercase tracking-[0.28em] text-stone-500">Input Console</div>
+              <h2 class="mt-2 text-2xl font-semibold">生成配置</h2>
+            </div>
+            <button
+              type="submit"
+              class="inline-flex items-center rounded-full bg-stone-900 px-5 py-3 text-sm font-medium text-white transition hover:bg-stone-700"
+            >
+              生成人物画像
+            </button>
+          </div>
+
+          <section class="mt-8">
+            <div class="text-sm font-medium text-stone-900">1. 选择 agent</div>
+            <div class="mt-4 grid gap-4 md:grid-cols-2">
+              <label class="rounded-[1.5rem] border border-stone-200 bg-stone-50 p-4 transition hover:border-amber-300 hover:bg-amber-50/60">
+                <div class="flex items-center gap-3">
+                  <input type="checkbox" name="agents" value="codex" class="h-4 w-4 rounded border-stone-300 text-stone-900 focus:ring-stone-400" />
+                  <span class="text-base font-medium">Codex</span>
+                </div>
+                <p class="mt-3 text-sm leading-6 text-stone-600">读取本机 Codex 会话目录，优先作为主要人物画像的聊天记录来源。</p>
+              </label>
+              <label class="rounded-[1.5rem] border border-stone-200 bg-stone-50 p-4 transition hover:border-amber-300 hover:bg-amber-50/60">
+                <div class="flex items-center gap-3">
+                  <input type="checkbox" name="agents" value="claude-code" class="h-4 w-4 rounded border-stone-300 text-stone-900 focus:ring-stone-400" />
+                  <span class="text-base font-medium">Claude Code</span>
+                </div>
+                <p class="mt-3 text-sm leading-6 text-stone-600">如果本机存在 `~/.claude/projects/**/*.jsonl`，会并入聊天记录来源。</p>
+              </label>
+            </div>
+          </section>
+
+          <section class="mt-8">
+            <div class="flex items-center justify-between gap-4">
+              <div>
+                <div class="text-sm font-medium text-stone-900">2. 本地路径映射</div>
+                <p class="mt-1 text-sm text-stone-500">支持 `workspace_dir`、`source_dir`、`chat_override`。</p>
+              </div>
+              <button type="button" id="add-path-mapping" class="rounded-full border border-stone-200 px-4 py-2 text-sm font-medium text-stone-700 transition hover:border-stone-400">
+                添加路径
+              </button>
+            </div>
+            <div id="path-mappings" class="mt-4 space-y-3"></div>
+          </section>
+
+          <section class="mt-8">
+            <div class="flex items-center justify-between gap-4">
+              <div>
+                <div class="text-sm font-medium text-stone-900">3. 外部链接</div>
+                <p class="mt-1 text-sm text-stone-500">支持 `github`、`linkedin`、`website`。</p>
+              </div>
+              <button type="button" id="add-link" class="rounded-full border border-stone-200 px-4 py-2 text-sm font-medium text-stone-700 transition hover:border-stone-400">
+                添加链接
+              </button>
+            </div>
+            <div id="links" class="mt-4 space-y-3"></div>
+          </section>
+
+          <section class="mt-8">
+            <label class="block text-sm font-medium text-stone-900" for="output_dir">4. 可选输出地址</label>
+            <input
+              id="output_dir"
+              name="output_dir"
+              type="text"
+              placeholder="留空则默认当前工作目录下的 PersonaVault/"
+              class="mt-3 w-full rounded-[1.25rem] border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-800 outline-none transition focus:border-stone-400 focus:bg-white"
+            />
+          </section>
+        </form>
+
+        <aside class="rounded-[2rem] border border-stone-200 bg-white/92 p-7 shadow-sm">
+          <div class="text-xs font-semibold uppercase tracking-[0.28em] text-stone-500">Run State</div>
+          <div id="idle-panel" class="mt-4">
+            <div class="rounded-[1.5rem] bg-stone-900 p-6 text-stone-100">
+              <div class="text-lg font-semibold">等待输入</div>
+              <p class="mt-3 text-sm leading-7 text-stone-300">选择 agent、补充本地路径与链接后，即可让本机 Codex 独立执行 PersonaVault 生成任务。</p>
+            </div>
+          </div>
+
+          <div id="job-panel" class="mt-4 hidden">
+            <div class="rounded-[1.75rem] border border-stone-200 bg-stone-50 p-6 text-center">
+              <div class="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-stone-900/95">
+                <div class="h-8 w-8 animate-spin rounded-full border-2 border-white/20 border-t-white"></div>
+              </div>
+              <div id="job-stage" class="mt-5 text-base font-semibold text-stone-900">准备启动</div>
+              <div id="job-message" class="mt-2 text-sm leading-7 text-stone-600">正在等待任务状态。</div>
+              <div class="mt-5 grid gap-3 text-left text-sm text-stone-500">
+                <div class="rounded-2xl bg-white px-4 py-3">discovering_sources</div>
+                <div class="rounded-2xl bg-white px-4 py-3">preparing_prompt</div>
+                <div class="rounded-2xl bg-white px-4 py-3">running_codex</div>
+                <div class="rounded-2xl bg-white px-4 py-3">writing_vault</div>
+              </div>
+            </div>
+          </div>
+
+          <div id="success-panel" class="mt-4 hidden">
+            <div class="rounded-[1.75rem] border border-emerald-200 bg-emerald-50 p-6">
+              <div class="text-lg font-semibold text-emerald-900">生成完成</div>
+              <p id="success-message" class="mt-3 text-sm leading-7 text-emerald-800"></p>
+              <div class="mt-4 rounded-2xl bg-white px-4 py-4 text-sm text-stone-700">
+                <div class="font-medium text-stone-900">Vault 输出路径</div>
+                <div id="vault-path" class="mt-2 break-all"></div>
+                <div class="mt-4 font-medium text-stone-900">主要画像文件</div>
+                <div id="profile-path" class="mt-2 break-all"></div>
+                <div class="mt-4 font-medium text-stone-900">网页预览地址</div>
+                <div id="site-url" class="mt-2 break-all"></div>
+              </div>
+              <div class="mt-5 flex flex-wrap gap-3">
+                <button
+                  type="button"
+                  id="open-site"
+                  class="inline-flex items-center rounded-full bg-emerald-700 px-5 py-3 text-sm font-medium text-white transition hover:bg-emerald-600"
+                >
+                  打开网页预览
+                </button>
+                <button
+                  type="button"
+                  id="open-obsidian"
+                  class="inline-flex items-center rounded-full bg-stone-900 px-5 py-3 text-sm font-medium text-white transition hover:bg-stone-700"
+                >
+                  在 Obsidian 中打开
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div id="error-panel" class="mt-4 hidden">
+            <div class="rounded-[1.75rem] border border-rose-200 bg-rose-50 p-6">
+              <div class="text-lg font-semibold text-rose-900">生成失败</div>
+              <p id="error-message" class="mt-3 text-sm leading-7 text-rose-800"></p>
+            </div>
+          </div>
+        </aside>
+      </section>
+    </main>
+
+    <template id="path-mapping-template">
+      <div class="grid gap-3 rounded-[1.25rem] border border-stone-200 bg-stone-50 p-4 md:grid-cols-[0.42fr_1fr_auto]">
+        <label class="text-sm font-medium text-stone-700">
+          类型
+          <select data-field="type" class="mt-2 w-full rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm">
+            <option value="workspace_dir">workspace_dir</option>
+            <option value="source_dir">source_dir</option>
+            <option value="chat_override">chat_override</option>
+          </select>
+        </label>
+        <label class="text-sm font-medium text-stone-700">
+          路径
+          <input data-field="path" type="text" class="mt-2 w-full rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm" placeholder="/absolute/path" />
+        </label>
+        <button type="button" data-action="remove" class="self-end rounded-full border border-stone-200 px-4 py-2 text-sm font-medium text-stone-600 transition hover:border-stone-400">
+          删除
+        </button>
+      </div>
+    </template>
+
+    <template id="link-template">
+      <div class="grid gap-3 rounded-[1.25rem] border border-stone-200 bg-stone-50 p-4 md:grid-cols-[0.38fr_1fr_auto]">
+        <label class="text-sm font-medium text-stone-700">
+          类型
+          <select data-field="kind" class="mt-2 w-full rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm">
+            <option value="github">github</option>
+            <option value="linkedin">linkedin</option>
+            <option value="website">website</option>
+          </select>
+        </label>
+        <label class="text-sm font-medium text-stone-700">
+          URL
+          <input data-field="url" type="text" class="mt-2 w-full rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm" placeholder="https://example.com" />
+        </label>
+        <button type="button" data-action="remove" class="self-end rounded-full border border-stone-200 px-4 py-2 text-sm font-medium text-stone-600 transition hover:border-stone-400">
+          删除
+        </button>
+      </div>
+    </template>
+
+    <script>
+      const pathMappings = document.getElementById("path-mappings");
+      const links = document.getElementById("links");
+      const pathTemplate = document.getElementById("path-mapping-template");
+      const linkTemplate = document.getElementById("link-template");
+      const form = document.getElementById("generator-form");
+      const idlePanel = document.getElementById("idle-panel");
+      const jobPanel = document.getElementById("job-panel");
+      const successPanel = document.getElementById("success-panel");
+      const errorPanel = document.getElementById("error-panel");
+      const stageNode = document.getElementById("job-stage");
+      const messageNode = document.getElementById("job-message");
+      const successMessageNode = document.getElementById("success-message");
+      const errorMessageNode = document.getElementById("error-message");
+      const vaultPathNode = document.getElementById("vault-path");
+      const profilePathNode = document.getElementById("profile-path");
+      const siteUrlNode = document.getElementById("site-url");
+      const openSiteButton = document.getElementById("open-site");
+      const openObsidianButton = document.getElementById("open-obsidian");
+      let currentJob = null;
+      let pendingRedirect = null;
+
+      function appendTemplate(container, template) {
+        const fragment = template.content.cloneNode(true);
+        const row = fragment.firstElementChild;
+        row.querySelector('[data-action="remove"]').addEventListener("click", () => row.remove());
+        container.appendChild(fragment);
+      }
+
+      function collectRows(container) {
+        return Array.from(container.children)
+          .map((row) => {
+            const data = {};
+            row.querySelectorAll("[data-field]").forEach((field) => {
+              data[field.dataset.field] = field.value.trim();
+            });
+            return data;
+          })
+          .filter((item) => Object.values(item).every((value) => value));
+      }
+
+      function setPanelState(target) {
+        if (pendingRedirect) {
+          clearTimeout(pendingRedirect);
+          pendingRedirect = null;
+        }
+        [idlePanel, jobPanel, successPanel, errorPanel].forEach((panel) => panel.classList.add("hidden"));
+        target.classList.remove("hidden");
+      }
+
+      async function pollJob(jobId) {
+        const response = await fetch(`/api/jobs/${jobId}`);
+        const data = await response.json();
+        if (data.status === "running") {
+          stageNode.textContent = data.stage;
+          messageNode.textContent = data.message;
+          setTimeout(() => pollJob(jobId), 1200);
+          return;
+        }
+
+        if (data.status === "completed") {
+          currentJob = data;
+          successMessageNode.textContent = data.site_url
+            ? `${data.message} 即将跳转到网页预览。`
+            : data.message;
+          vaultPathNode.textContent = data.vault_path || "";
+          profilePathNode.textContent = data.profile_path || "";
+          siteUrlNode.textContent = data.site_url || "";
+          setPanelState(successPanel);
+          if (data.site_url) {
+            pendingRedirect = setTimeout(() => window.location.assign(data.site_url), 900);
+          }
+          return;
+        }
+
+        errorMessageNode.textContent = data.message || "任务失败。";
+        setPanelState(errorPanel);
+      }
+
+      document.getElementById("add-path-mapping").addEventListener("click", () => appendTemplate(pathMappings, pathTemplate));
+      document.getElementById("add-link").addEventListener("click", () => appendTemplate(links, linkTemplate));
+      appendTemplate(pathMappings, pathTemplate);
+      appendTemplate(links, linkTemplate);
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const payload = {
+          agents: Array.from(form.querySelectorAll('input[name="agents"]:checked')).map((node) => node.value),
+          path_mappings: collectRows(pathMappings),
+          links: collectRows(links),
+          output_dir: document.getElementById("output_dir").value.trim(),
+        };
+
+        const response = await fetch("/api/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+
+        if (!response.ok) {
+          errorMessageNode.textContent = data.message || "请求失败。";
+          setPanelState(errorPanel);
+          return;
+        }
+
+        stageNode.textContent = "discovering_sources";
+        messageNode.textContent = "正在准备本地生成任务。";
+        setPanelState(jobPanel);
+        pollJob(data.job_id);
+      });
+
+      openObsidianButton.addEventListener("click", async () => {
+        if (!currentJob || !currentJob.vault_path) return;
+        const response = await fetch("/api/open-obsidian", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ vault_path: currentJob.vault_path }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          errorMessageNode.textContent = data.message || "无法打开 Obsidian。";
+          setPanelState(errorPanel);
+        }
+      });
+
+      openSiteButton.addEventListener("click", () => {
+        if (!currentJob || !currentJob.site_url) return;
+        window.location.assign(currentJob.site_url);
+      });
+    </script>
+  </body>
+</html>
