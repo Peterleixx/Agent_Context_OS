@@ -114,6 +114,57 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
         self.assertEqual(grouped["source_dirs"], ["/tmp/docs"])
         self.assertEqual(grouped["chat_override_paths"], ["/tmp/chat"])
 
+    def test_normalize_payload_includes_advanced_settings(self):
+        module = load_generator_module()
+
+        normalized = module.normalize_payload(
+            {
+                "agents": ["codex"],
+                "path_mappings": [],
+                "links": [],
+                "advanced_settings": {
+                    "target_scene": "job_jd",
+                    "job_jd_text": "AI Agent 产品经理",
+                    "focus_presets": ["能力亮点", "代表项目"],
+                    "focus_custom": "强调复杂工作流抽象能力",
+                    "redaction_profile": "conservative",
+                    "redaction_custom_rules": "不要写真实公司名",
+                },
+            },
+            Path("/tmp/workdir"),
+        )
+
+        self.assertEqual(normalized["advanced_settings"]["target_scene"], "job_jd")
+        self.assertEqual(normalized["advanced_settings"]["focus_presets"], ["能力亮点", "代表项目"])
+        self.assertEqual(normalized["advanced_settings"]["redaction_custom_rules"], "不要写真实公司名")
+
+    def test_generation_prompt_mentions_render_profile_json_and_advanced_settings(self):
+        module = load_generator_module()
+        repo_root = Path(__file__).resolve().parents[1]
+
+        prompt = module.build_generation_prompt(
+            repo_root,
+            {
+                "agents": ["codex"],
+                "path_mappings": [],
+                "links": [],
+                "advanced_settings": {
+                    "target_scene": "job_jd",
+                    "job_jd_text": "AI Agent 岗位 JD",
+                    "focus_presets": ["能力亮点"],
+                    "focus_custom": "",
+                    "redaction_profile": "conservative",
+                    "redaction_custom_rules": "",
+                },
+            },
+            Path("/tmp/workdir"),
+        )
+
+        self.assertIn(".persona-system/render-profile.json", prompt)
+        self.assertIn("核心能力总览", prompt)
+        self.assertIn('"target_scene": "job_jd"', prompt)
+        self.assertIn("岗位/JD", prompt)
+
     def test_parse_codex_output_skips_non_json_lines(self):
         module = load_generator_module()
 
@@ -147,12 +198,23 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
             self.assertIn("workspace_dir", html)
             self.assertIn("linkedin", html)
             self.assertIn("output_dir", html)
+            self.assertIn("岗位/JD", html)
+            self.assertIn("job_jd_text", html)
+            self.assertIn("redaction_custom_rules", html)
 
             payload = {
                 "agents": ["codex"],
                 "path_mappings": [{"type": "workspace_dir", "path": "/tmp/workspace"}],
                 "links": [{"kind": "github", "url": "https://github.com/example"}],
                 "output_dir": "",
+                "advanced_settings": {
+                    "target_scene": "job_jd",
+                    "job_jd_text": "JD content",
+                    "focus_presets": ["能力亮点", "代表项目"],
+                    "focus_custom": "强调证据驱动",
+                    "redaction_profile": "conservative",
+                    "redaction_custom_rules": "不要写真实公司名",
+                },
             }
             request = urllib.request.Request(
                 f"{base_url}/api/generate",
@@ -163,6 +225,8 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
             response = json.loads(urllib.request.urlopen(request).read().decode("utf-8"))
             self.assertEqual(response["job_id"], "job_test")
             self.assertEqual(runner.last_payload["agents"], ["codex"])
+            self.assertEqual(runner.last_payload["advanced_settings"]["target_scene"], "job_jd")
+            self.assertEqual(runner.last_payload["advanced_settings"]["focus_presets"], ["能力亮点", "代表项目"])
 
             job = json.loads(
                 urllib.request.urlopen(f"{base_url}/api/jobs/job_test").read().decode("utf-8")
@@ -215,6 +279,21 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
                 httpd.shutdown()
                 httpd.server_close()
                 thread.join(timeout=2)
+
+    def test_index_template_keeps_success_on_first_page(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        template_path = (
+            repo_root
+            / "skills"
+            / "persona-vault-generator-app"
+            / "templates"
+            / "index.html"
+        )
+        html = template_path.read_text(encoding="utf-8")
+
+        self.assertIn("打开网页预览", html)
+        self.assertNotIn("即将跳转到网页预览", html)
+        self.assertNotIn("pendingRedirect = setTimeout", html)
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import json
 import math
 import re
 from dataclasses import dataclass
@@ -17,6 +18,16 @@ class MarkdownDoc:
     sections: dict[str, list[str]]
 
 
+FOCUS_PRESET_LABELS = [
+    "能力亮点",
+    "代表项目",
+    "工作经历",
+    "领域方向",
+    "业务结果",
+    "协作风格",
+]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Render a PersonaVault into a static profile page."
@@ -25,6 +36,71 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--site-title")
     return parser.parse_args()
+
+
+def dedupe_strings(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for raw in items:
+        item = str(raw).strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        ordered.append(item)
+    return ordered
+
+
+def default_generation_context() -> dict[str, object]:
+    return {
+        "target_scene": "job_jd",
+        "job_jd_text": "",
+        "focus_presets": [],
+        "focus_custom": "",
+        "redaction_profile": "conservative",
+        "redaction_custom_rules": "",
+    }
+
+
+def infer_icon(label: str, fallback: str = "sparkles") -> str:
+    source = html.unescape(label).lower()
+    if any(token in source for token in ("岗位", "角色", "job", "jd", "work", "经历")):
+        return "briefcase"
+    if any(token in source for token in ("focus", "关注", "主题", "方向", "target")):
+        return "target"
+    if any(token in source for token in ("style", "偏好", "决策", "协作", "原则", "风格")):
+        return "shield"
+    if any(token in source for token in ("交付", "工具", "agent", "工程", "封装", "cli")):
+        return "wrench"
+    if any(token in source for token in ("知识", "markdown", "obsidian", "系统")):
+        return "book"
+    if any(token in source for token in ("分析", "风险", "研究", "投资", "数据")):
+        return "chart"
+    if any(token in source for token in ("项目", "project")):
+        return "layers"
+    return fallback
+
+
+def icon_emoji(icon: str) -> str:
+    mapping = {
+        "briefcase": "💼",
+        "target": "🎯",
+        "shield": "🛡",
+        "wrench": "🛠",
+        "book": "📚",
+        "chart": "📈",
+        "layers": "🧱",
+        "sparkles": "✦",
+        "users": "👥",
+    }
+    return mapping.get(icon, "✦")
+
+
+def render_icon_token(icon: str, title: str) -> str:
+    return (
+        '<span class="inline-flex h-10 w-10 items-center justify-center rounded-2xl '
+        'bg-stone-900 text-lg text-white"'
+        f' aria-label="{clean_inline(title)}">{icon_emoji(icon)}</span>'
+    )
 
 
 def strip_frontmatter(text: str) -> str:
@@ -211,6 +287,27 @@ def render_value_cards(cards: list[dict[str, str]]) -> str:
     return "".join(parts)
 
 
+def render_profile_facets(items: list[dict[str, str]]) -> str:
+    if not items:
+        return render_empty_state("No profile facets available.")
+
+    parts: list[str] = []
+    for item in items:
+        title = item.get("title", "")
+        summary = item.get("summary", "")
+        icon = item.get("icon", "sparkles")
+        parts.append(
+            '<article class="rounded-[1.75rem] border border-stone-200 bg-white p-5 shadow-sm">'
+            '<div class="flex items-start gap-4">'
+            f'{render_icon_token(icon, title)}'
+            '<div class="min-w-0">'
+            f'<h3 class="text-base font-semibold text-stone-900">{clean_inline(title)}</h3>'
+            f'<p class="mt-2 text-sm leading-7 text-stone-600">{clean_inline(summary)}</p>'
+            "</div></div></article>"
+        )
+    return "".join(parts)
+
+
 def render_work_history(note: str, header: list[str], rows: list[list[str]], gaps: list[str]) -> str:
     parts: list[str] = []
 
@@ -363,13 +460,19 @@ def parse_capability_metrics(capability_map_doc: MarkdownDoc | None) -> list[dic
         title = row[0]
         judgment = row[1]
         confidence = row[2]
+        icon = row[3] if len(row) > 3 and row[3] else infer_icon(title, "wrench")
+        keywords = []
+        if len(row) > 4 and row[4]:
+            keywords = [part.strip() for part in html.unescape(row[4]).split(",") if part.strip()]
         metrics.append(
             {
                 "title": title,
                 "short_title": normalize_capability_label(title),
+                "icon": icon,
                 "judgment": judgment,
                 "confidence": confidence,
                 "score": confidence_to_score(confidence),
+                "keywords": keywords,
             }
         )
     return metrics
@@ -392,8 +495,11 @@ def render_capability_bars(metrics: list[dict[str, str | int]]) -> str:
         parts.append('<div class="rounded-2xl bg-white p-4 shadow-sm">')
         parts.append('<div class="flex items-start justify-between gap-4">')
         parts.append(
+            '<div class="flex items-start gap-3">'
+            f'{render_icon_token(str(metric.get("icon", "wrench")), str(metric["short_title"]))}'
             f'<div><div class="text-sm font-semibold text-stone-900">{metric["short_title"]}</div>'
             f'<div class="mt-1 text-xs text-stone-500">{metric["judgment"]}</div></div>'
+            "</div>"
         )
         parts.append(
             f'<div class="text-right text-sm font-medium text-stone-700">{metric["confidence"]}<div class="text-xs text-stone-400">{score}/100</div></div>'
@@ -456,6 +562,7 @@ def render_capability_radar(metrics: list[dict[str, str | int]]) -> str:
         legend_items.append(
             '<li class="flex items-center gap-3 rounded-2xl bg-white px-3 py-2 shadow-sm">'
             f'<span class="inline-flex h-8 w-8 items-center justify-center rounded-full bg-stone-900 text-xs font-semibold text-white">{index:02d}</span>'
+            f'{render_icon_token(str(metric.get("icon", "wrench")), str(metric["short_title"]))}'
             f'<div><div class="text-sm font-medium text-stone-900">{metric["short_title"]}</div>'
             f'<div class="text-xs text-stone-500">{metric["confidence"]} / {metric["judgment"]}</div></div>'
             "</li>"
@@ -537,7 +644,50 @@ def load_markdown_if_exists(path: Path) -> MarkdownDoc | None:
     return parse_markdown(path)
 
 
-def build_site_payload(persona_vault_path: Path, site_title: str | None) -> dict[str, str]:
+def load_render_profile_if_exists(persona_vault_path: Path) -> dict[str, object] | None:
+    path = persona_vault_path / ".persona-system" / "render-profile.json"
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def normalize_capability_metric(metric: dict[str, object]) -> dict[str, str | int]:
+    title = str(metric.get("title", "")).strip()
+    short_title = str(metric.get("short_title", "")).strip() or normalize_capability_label(title)
+    confidence = str(metric.get("confidence", "")).strip() or "中"
+    score = metric.get("score")
+    if not isinstance(score, int):
+        score = confidence_to_score(confidence)
+    keywords = metric.get("keywords", [])
+    if not isinstance(keywords, list):
+        keywords = []
+    return {
+        "title": title,
+        "short_title": short_title,
+        "icon": str(metric.get("icon", "")).strip() or infer_icon(title, "wrench"),
+        "judgment": str(metric.get("judgment", "")).strip() or "已提炼能力信号",
+        "confidence": confidence,
+        "score": score,
+        "keywords": dedupe_strings([str(item) for item in keywords]),
+    }
+
+
+def normalize_profile_facet(facet: dict[str, object]) -> dict[str, str]:
+    title = str(facet.get("title", "")).strip()
+    return {
+        "icon": str(facet.get("icon", "")).strip() or infer_icon(title, "sparkles"),
+        "title": title,
+        "summary": str(facet.get("summary", "")).strip(),
+    }
+
+
+def build_render_profile_from_markdown(
+    persona_vault_path: Path, generation_context: dict[str, object] | None = None
+) -> dict[str, object]:
     profile_dir = persona_vault_path / "00 - Profile"
     capability_dir = persona_vault_path / "01 - Capabilities"
     project_dir = persona_vault_path / "02 - Projects"
@@ -551,21 +701,24 @@ def build_site_payload(persona_vault_path: Path, site_title: str | None) -> dict
 
     hero_points = extract_bullets(about.sections.get("保守摘要", [])) if about else []
     if not hero_points and primary_profile:
-        hero_points.extend(extract_bullets(primary_profile.sections.get("当前角色定位", [])))
+        current_role = extract_first_paragraph(primary_profile.sections.get("当前角色定位", []))
+        if current_role:
+            hero_points.append(current_role)
         hero_points.extend(extract_bullets(primary_profile.sections.get("当前关注主题", [])))
         hero_points.extend(extract_bullets(primary_profile.sections.get("稳定偏好与决策风格", [])))
+
     keyword_header, keyword_rows = (
         parse_markdown_table(about.sections.get("画像关键词", [])) if about else ([], [])
     )
-    keyword_index = 0 if keyword_header else 0
-    keyword_chips = [row[keyword_index] for row in keyword_rows if row]
+    keyword_chips = [row[0] for row in keyword_rows if row]
 
     focus_items = (
         extract_bullets(current_focus.sections.get("近期焦点", [])) if current_focus else []
     )
     if not focus_items and primary_profile:
         focus_items = extract_bullets(primary_profile.sections.get("当前关注主题", []))
-    work_style_items = []
+
+    work_style_items: list[str] = []
     if current_focus:
         work_style_items.extend(extract_bullets(current_focus.sections.get("当前可见任务风格", [])))
     if values:
@@ -574,30 +727,45 @@ def build_site_payload(persona_vault_path: Path, site_title: str | None) -> dict
         work_style_items.extend(extract_bullets(primary_profile.sections.get("稳定偏好与决策风格", [])))
 
     value_cards = parse_preference_cards(values.sections.get("核心偏好", [])) if values else []
-
-    work_note = extract_blockquote(work_history.sections.get("可见工作轨迹", [])) if work_history else ""
-    work_table_header, work_table_rows = (
-        parse_markdown_table(work_history.sections.get("可见工作轨迹", []))
-        if work_history
-        else ([], [])
-    )
-    work_table_header, work_table_rows = drop_columns(
-        work_table_header, work_table_rows, {"证据"}
-    )
-    work_gaps = extract_bullets(work_history.sections.get("资料不足", [])) if work_history else []
-    capability_metrics = parse_capability_metrics(capability_map)
+    if not value_cards:
+        value_cards = [
+            {"title": item, "description": ""}
+            for item in work_style_items[:3]
+        ]
 
     capability_cards: list[dict[str, object]] = []
     for path in sorted(capability_dir.glob("能力-*.md")):
         doc = parse_markdown(path)
+        highlights = extract_bullets(doc.sections.get("典型表现", []))
+        public_notes = extract_bullets(doc.sections.get("可对外表述", []))
+        title = clean_inline(doc.title)
         capability_cards.append(
             {
-                "title": clean_inline(doc.title),
+                "title": title,
                 "summary": extract_first_paragraph(doc.sections.get("一句话定义", [])),
-                "highlights": extract_bullets(doc.sections.get("典型表现", [])),
-                "public_notes": extract_bullets(doc.sections.get("可对外表述", [])),
+                "highlights": highlights,
+                "public_notes": public_notes,
+                "icon": infer_icon(title, "wrench"),
+                "keywords": dedupe_strings(
+                    [normalize_capability_label(title)] + highlights[:1] + public_notes[:1]
+                ),
             }
         )
+
+    capability_metrics = parse_capability_metrics(capability_map)
+    if not capability_metrics:
+        capability_metrics = [
+            {
+                "title": str(card["title"]),
+                "short_title": normalize_capability_label(str(card["title"])),
+                "icon": str(card["icon"]),
+                "judgment": "已提炼能力信号",
+                "confidence": "中",
+                "score": 65,
+                "keywords": card["keywords"],
+            }
+            for card in capability_cards
+        ]
 
     project_cards: list[dict[str, object]] = []
     for path in sorted(project_dir.glob("项目-*.md")):
@@ -618,29 +786,163 @@ def build_site_payload(persona_vault_path: Path, site_title: str | None) -> dict
             }
         )
 
-    page_title = clean_inline(site_title or (about.title if about else "Persona Profile"))
+    if not keyword_chips:
+        keyword_chips = dedupe_strings(
+            focus_items[:3]
+            + [str(metric["short_title"]) for metric in capability_metrics[:3]]
+        )[:6]
+
+    profile_facets: list[dict[str, str]] = []
+    if primary_profile:
+        current_role = extract_first_paragraph(primary_profile.sections.get("当前角色定位", []))
+        if current_role:
+            profile_facets.append(
+                {
+                    "icon": "briefcase",
+                    "title": "岗位叙事重心",
+                    "summary": current_role,
+                }
+            )
+    if focus_items:
+        profile_facets.append(
+            {
+                "icon": "target",
+                "title": "当前聚焦场景",
+                "summary": "；".join(focus_items[:3]),
+            }
+        )
+    if work_style_items:
+        profile_facets.append(
+            {
+                "icon": "shield",
+                "title": "协作与判断风格",
+                "summary": "；".join(work_style_items[:3]),
+            }
+        )
+
+    work_note = extract_blockquote(work_history.sections.get("可见工作轨迹", [])) if work_history else ""
+    work_table_header, work_table_rows = (
+        parse_markdown_table(work_history.sections.get("可见工作轨迹", []))
+        if work_history
+        else ([], [])
+    )
+    work_table_header, work_table_rows = drop_columns(
+        work_table_header, work_table_rows, {"证据"}
+    )
+    work_gaps = extract_bullets(work_history.sections.get("资料不足", [])) if work_history else []
+
+    return {
+        "generation_context": {**default_generation_context(), **(generation_context or {})},
+        "profile_facets": [normalize_profile_facet(item) for item in profile_facets],
+        "keyword_chips": dedupe_strings(keyword_chips),
+        "focus_items": dedupe_strings(focus_items),
+        "work_style_items": dedupe_strings(work_style_items),
+        "value_cards": value_cards,
+        "capability_metrics": [normalize_capability_metric(item) for item in capability_metrics],
+        "project_capability_matrix": [
+            {"title": str(item["title"]), "capabilities": list(item["capabilities"])}
+            for item in project_cards
+        ],
+        "public_summary": dedupe_strings(hero_points),
+        "capability_cards": capability_cards,
+        "project_cards": project_cards,
+        "work_history": {
+            "note": work_note,
+            "header": work_table_header,
+            "rows": work_table_rows,
+            "gaps": work_gaps,
+        },
+    }
+
+
+def merge_render_profile(
+    preferred: dict[str, object] | None, fallback: dict[str, object]
+) -> dict[str, object]:
+    if not preferred:
+        return fallback
+
+    merged = dict(fallback)
+    merged.update(preferred)
+    merged["generation_context"] = {
+        **default_generation_context(),
+        **fallback.get("generation_context", {}),
+        **preferred.get("generation_context", {}),
+    }
+
+    for key in (
+        "profile_facets",
+        "keyword_chips",
+        "focus_items",
+        "work_style_items",
+        "value_cards",
+        "capability_metrics",
+        "project_capability_matrix",
+        "public_summary",
+        "capability_cards",
+        "project_cards",
+    ):
+        value = preferred.get(key)
+        if not value:
+            merged[key] = fallback.get(key, [])
+
+    if not preferred.get("work_history"):
+        merged["work_history"] = fallback.get("work_history", {})
+
+    merged["profile_facets"] = [
+        normalize_profile_facet(item)
+        for item in merged.get("profile_facets", [])
+        if isinstance(item, dict)
+    ]
+    merged["capability_metrics"] = [
+        normalize_capability_metric(item)
+        for item in merged.get("capability_metrics", [])
+        if isinstance(item, dict)
+    ]
+    return merged
+
+
+def build_site_payload(persona_vault_path: Path, site_title: str | None) -> dict[str, str]:
+    primary_profile = load_markdown_if_exists(persona_vault_path / "00 - Profile" / "主要人物画像.md")
+    fallback_data = build_render_profile_from_markdown(persona_vault_path)
+    render_profile = merge_render_profile(
+        load_render_profile_if_exists(persona_vault_path),
+        fallback_data,
+    )
+
+    page_title = clean_inline(site_title or (primary_profile.title if primary_profile else "Persona Profile"))
+    capability_metrics = list(render_profile.get("capability_metrics", []))
+    capability_cards = list(render_profile.get("capability_cards", []))
+    project_cards = list(render_profile.get("project_cards", []))
+    project_matrix = list(render_profile.get("project_capability_matrix", project_cards))
     capability_titles_for_matrix = [str(metric["title"]) for metric in capability_metrics] or [
         str(card["title"]) for card in capability_cards
     ]
     obsidian_home_url = (
         f"obsidian://open?vault={quote(persona_vault_path.name)}&file={quote('Home.md')}"
     )
+    work_history = render_profile.get("work_history", {})
 
     return {
         "SITE_TITLE": page_title,
         "PAGE_TITLE": page_title,
         "GENERATED_AT": html.escape(datetime.now().strftime("%Y-%m-%d %H:%M")),
         "OBSIDIAN_HOME_URL": html.escape(obsidian_home_url),
-        "HERO_POINTS": render_list(hero_points, tone="dark"),
-        "KEYWORD_CHIPS": render_keyword_chips(keyword_chips),
-        "CURRENT_FOCUS": render_list(focus_items),
-        "WORK_STYLE": render_list(work_style_items),
-        "VALUE_CARDS": render_value_cards(value_cards),
-        "WORK_HISTORY": render_work_history(work_note, work_table_header, work_table_rows, work_gaps),
+        "HERO_POINTS": render_list(list(render_profile.get("public_summary", [])), tone="dark"),
+        "PROFILE_FACETS": render_profile_facets(list(render_profile.get("profile_facets", []))),
+        "KEYWORD_CHIPS": render_keyword_chips(list(render_profile.get("keyword_chips", []))),
+        "CURRENT_FOCUS": render_list(list(render_profile.get("focus_items", []))),
+        "WORK_STYLE": render_list(list(render_profile.get("work_style_items", []))),
+        "VALUE_CARDS": render_value_cards(list(render_profile.get("value_cards", []))),
+        "WORK_HISTORY": render_work_history(
+            str(work_history.get("note", "")),
+            list(work_history.get("header", [])),
+            list(work_history.get("rows", [])),
+            list(work_history.get("gaps", [])),
+        ),
         "CAPABILITY_RADAR": render_capability_radar(capability_metrics),
         "CAPABILITY_BARS": render_capability_bars(capability_metrics),
         "PROJECT_CAPABILITY_MATRIX": render_project_capability_matrix(
-            project_cards, capability_titles_for_matrix
+            project_matrix, capability_titles_for_matrix
         ),
         "CAPABILITY_CARDS": render_capability_cards(capability_cards),
         "PROJECT_CARDS": render_project_cards(project_cards),

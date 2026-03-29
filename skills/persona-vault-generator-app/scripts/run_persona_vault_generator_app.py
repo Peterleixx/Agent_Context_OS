@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import subprocess
@@ -18,6 +19,14 @@ from urllib.parse import urlparse
 
 
 DEFAULT_JOB_MESSAGE = "正在调用本机 Codex 执行 PersonaVault 生成任务"
+FOCUS_PRESET_LABELS = [
+    "能力亮点",
+    "代表项目",
+    "工作经历",
+    "领域方向",
+    "业务结果",
+    "协作风格",
+]
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -51,6 +60,25 @@ def split_path_mappings(path_mappings: list[dict[str, Any]]) -> dict[str, list[s
             continue
         grouped[key].append(path)
     return grouped
+
+
+def normalize_advanced_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
+    raw = raw or {}
+    focus_presets = raw.get("focus_presets", [])
+    if not isinstance(focus_presets, list):
+        focus_presets = []
+    return {
+        "target_scene": str(raw.get("target_scene", "")).strip() or "job_jd",
+        "job_jd_text": str(raw.get("job_jd_text", "")).strip(),
+        "focus_presets": [
+            item
+            for item in [str(entry).strip() for entry in focus_presets]
+            if item in FOCUS_PRESET_LABELS
+        ],
+        "focus_custom": str(raw.get("focus_custom", "")).strip(),
+        "redaction_profile": str(raw.get("redaction_profile", "")).strip() or "conservative",
+        "redaction_custom_rules": str(raw.get("redaction_custom_rules", "")).strip(),
+    }
 
 
 def parse_codex_output_lines(lines: list[str]) -> list[dict[str, Any]]:
@@ -129,6 +157,7 @@ def normalize_payload(payload: dict[str, Any], working_directory: Path) -> dict[
         "chat_override_paths": grouped["chat_override_paths"],
         "profile_links": links,
         "output_dir": output_dir or str((working_directory / "PersonaVault").resolve()),
+        "advanced_settings": normalize_advanced_settings(payload.get("advanced_settings")),
     }
 
 
@@ -145,8 +174,16 @@ def build_generation_prompt(repo_root: Path, payload: dict[str, Any], working_di
         "Task:\n"
         "- Build or refresh a complete PersonaVault.\n"
         "- The primary profile file MUST be `00 - Profile/主要人物画像.md`.\n"
-        "- Generate Home.md, capabilities, projects, evidence, policies, source map, and audit files.\n"
+        "- Generate Home.md, profile support files, capabilities, projects, evidence, policies, source map, and audit files.\n"
+        "- You MUST also write `.persona-system/render-profile.json` with machine-readable rendering data.\n"
+        "- `01 - Capabilities/能力地图.md` MUST contain a `## 核心能力总览` Markdown table.\n"
+        "- The `核心能力总览` table MUST include columns: `能力 | 当前判断 | 置信度 | 图标 | 关键词`.\n"
+        "- Create or refresh `00 - Profile/About Me.md`, `00 - Profile/Current Focus.md`, `00 - Profile/Values And Preferences.md`, and `00 - Profile/Work History.md`.\n"
+        "- `render-profile.json` MUST include: `generation_context`, `profile_facets`, `keyword_chips`, `focus_items`, `work_style_items`, `value_cards`, `capability_metrics`, `project_capability_matrix`, and `public_summary`.\n"
+        "- Every capability metric in `render-profile.json` MUST have `icon`, `title`, `short_title`, `judgment`, `confidence`, and `score`.\n"
+        "- `profile_facets` are for key profile icon cards and every item MUST have `icon`, `title`, and `summary`.\n"
         "- Use the selected agents and local paths as authorized sources.\n"
+        "- The target scene for this run is 岗位/JD unless the structured input says otherwise.\n"
         "- External links are reference-only; do not fetch network content.\n"
         "- If the output directory already exists, refresh conservatively instead of deleting cards.\n"
         "- Default to Markdown-first output that Obsidian can open directly.\n\n"
@@ -160,6 +197,22 @@ def resolve_output_paths(payload: dict[str, Any], working_directory: Path) -> tu
     vault_path = Path(normalized["output_dir"]).expanduser().resolve()
     profile_path = vault_path / "00 - Profile" / "主要人物画像.md"
     return vault_path, profile_path
+
+
+def load_static_site_module(repo_root: Path) -> Any:
+    script_path = resolve_static_site_renderer_path(repo_root)
+    spec = importlib.util.spec_from_file_location("persona_vault_static_site_runtime", script_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def write_text_if_missing(path: Path, content: str) -> None:
+    if path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
 
 
 def open_obsidian_vault(vault_path: str) -> dict[str, Any]:
@@ -233,6 +286,104 @@ class CodexPersonaJobRunner:
             for key, value in changes.items():
                 setattr(state, key, value)
 
+    def _enhance_persona_vault(self, vault_path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+        static_site_module = load_static_site_module(self.repo_root)
+        advanced_settings = normalize_payload(payload, self.working_directory)["advanced_settings"]
+        render_profile = static_site_module.build_render_profile_from_markdown(
+            vault_path,
+            advanced_settings,
+        )
+        self._ensure_profile_support_files(vault_path, render_profile)
+        self._ensure_capability_map_table(vault_path, render_profile)
+        self._write_render_profile_json(vault_path, render_profile)
+        return render_profile
+
+    def _ensure_profile_support_files(self, vault_path: Path, render_profile: dict[str, Any]) -> None:
+        profile_dir = vault_path / "00 - Profile"
+        profile_dir.mkdir(parents=True, exist_ok=True)
+
+        public_summary = [str(item) for item in render_profile.get("public_summary", []) if str(item).strip()]
+        keyword_chips = [str(item) for item in render_profile.get("keyword_chips", []) if str(item).strip()]
+        focus_items = [str(item) for item in render_profile.get("focus_items", []) if str(item).strip()]
+        work_style_items = [str(item) for item in render_profile.get("work_style_items", []) if str(item).strip()]
+        value_cards = render_profile.get("value_cards", [])
+
+        about_lines = ["# About Me", "", "## 保守摘要", ""]
+        about_lines.extend([f"- {item}" for item in public_summary] or ["- 资料待补"])
+        about_lines.extend(["", "## 画像关键词", "", "| 关键词 | 说明 |", "| --- | --- |"])
+        about_lines.extend(
+            [f"| {item} | 来自本次画像提炼与岗位/JD聚焦 |" for item in keyword_chips]
+            or ["| 资料待补 | 待补充关键词 |"]
+        )
+        write_text_if_missing(profile_dir / "About Me.md", "\n".join(about_lines) + "\n")
+
+        focus_lines = ["# Current Focus", "", "## 近期焦点", ""]
+        focus_lines.extend([f"- {item}" for item in focus_items] or ["- 资料待补"])
+        focus_lines.extend(["", "## 当前可见任务风格", ""])
+        focus_lines.extend([f"- {item}" for item in work_style_items] or ["- 资料待补"])
+        write_text_if_missing(profile_dir / "Current Focus.md", "\n".join(focus_lines) + "\n")
+
+        values_lines = ["# Values And Preferences", "", "## 核心偏好", ""]
+        if isinstance(value_cards, list) and value_cards:
+            for item in value_cards:
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("title", "")).strip()
+                description = str(item.get("description", "")).strip()
+                if not title:
+                    continue
+                values_lines.append(f"- {title}")
+                if description:
+                    values_lines.append(f"  - {description}")
+        else:
+            values_lines.append("- 资料待补")
+        write_text_if_missing(profile_dir / "Values And Preferences.md", "\n".join(values_lines) + "\n")
+
+        work_history_lines = [
+            "# Work History",
+            "",
+            "## 资料不足",
+            "",
+            "- 当前授权资料不足以恢复正式时间线",
+            "- 如需岗位/JD版本的工作经历，请补充简历或工作区材料后刷新",
+        ]
+        write_text_if_missing(profile_dir / "Work History.md", "\n".join(work_history_lines) + "\n")
+
+    def _ensure_capability_map_table(self, vault_path: Path, render_profile: dict[str, Any]) -> None:
+        capability_dir = vault_path / "01 - Capabilities"
+        capability_dir.mkdir(parents=True, exist_ok=True)
+        capability_map_path = capability_dir / "能力地图.md"
+        existing = capability_map_path.read_text(encoding="utf-8") if capability_map_path.exists() else "# 能力地图\n"
+        if "## 核心能力总览" in existing and "| 能力 | 当前判断 | 置信度 | 图标 | 关键词 |" in existing:
+            return
+
+        metrics = render_profile.get("capability_metrics", [])
+        lines = ["", "## 核心能力总览", "", "| 能力 | 当前判断 | 置信度 | 图标 | 关键词 |", "| --- | --- | --- | --- | --- |"]
+        if isinstance(metrics, list) and metrics:
+            for metric in metrics:
+                if not isinstance(metric, dict):
+                    continue
+                keywords = metric.get("keywords", [])
+                if not isinstance(keywords, list):
+                    keywords = []
+                keyword_text = ", ".join(str(item).strip() for item in keywords if str(item).strip())
+                lines.append(
+                    f"| {str(metric.get('title', '')).strip()} | {str(metric.get('judgment', '')).strip()} | "
+                    f"{str(metric.get('confidence', '')).strip()} | {str(metric.get('icon', '')).strip()} | {keyword_text} |"
+                )
+        else:
+            lines.append("| 能力-资料待补 | 待补充 | 中 | sparkles | 待补充 |")
+        capability_map_path.write_text(existing.rstrip() + "\n" + "\n".join(lines) + "\n", encoding="utf-8")
+
+    def _write_render_profile_json(self, vault_path: Path, render_profile: dict[str, Any]) -> None:
+        system_dir = vault_path / ".persona-system"
+        system_dir.mkdir(parents=True, exist_ok=True)
+        path = system_dir / "render-profile.json"
+        path.write_text(
+            json.dumps(render_profile, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
     def _run_job(self, job_id: str, payload: dict[str, Any]) -> None:
         self._update_job(job_id, stage="discovering_sources", message="正在整理输入来源。")
         prompt = build_generation_prompt(self.repo_root, payload, self.working_directory)
@@ -268,6 +419,19 @@ class CodexPersonaJobRunner:
             if last_message_path.exists():
                 final_message = last_message_path.read_text(encoding="utf-8").strip()
             if return_code == 0 and vault_path.exists():
+                self._update_job(job_id, stage="writing_vault", message="正在补齐结构化画像数据。")
+                try:
+                    self._enhance_persona_vault(vault_path, payload)
+                except Exception as exc:  # pragma: no cover - defensive runtime guard
+                    self._update_job(
+                        job_id,
+                        status="failed",
+                        stage="failed",
+                        message=f"补齐结构化画像数据失败: {exc}",
+                        vault_path=str(vault_path),
+                        profile_path=str(profile_path),
+                    )
+                    return
                 self._update_job(job_id, stage="writing_vault", message="正在导出静态网页。")
                 site_dir, site_path = resolve_site_output_paths(vault_path)
                 site_result = self._render_persona_site(vault_path, site_dir)

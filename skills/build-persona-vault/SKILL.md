@@ -64,6 +64,16 @@ description: Use when creating, refreshing, or repairing a local PersonaVault fr
 - `persona_vault_path`
   - 可选
   - 输出目录；默认是当前工作目录
+- `advanced_settings`
+  - 可选
+  - 面向首版网页渲染与岗位/JD场景的补充约束
+  - 至少支持：
+    - `target_scene`
+    - `job_jd_text`
+    - `focus_presets`
+    - `focus_custom`
+    - `redaction_profile`
+    - `redaction_custom_rules`
 - `include_types`
   - 默认支持：`md`, `txt`, `pdf`, `docx`, `readme`, `json`, `jsonl`
 - `mode`
@@ -124,6 +134,7 @@ description: Use when creating, refreshing, or repairing a local PersonaVault fr
 - `04 - Policies/`
 - `07 - Source Map/`
 - `08 - Audit/`
+- `.persona-system/render-profile.json`
 
 如果用户没有指定 `persona_vault_path`，以上文件和目录默认都创建在当前工作目录下。
 
@@ -156,6 +167,10 @@ description: Use when creating, refreshing, or repairing a local PersonaVault fr
    - 如果未授权联网抓取，只记录链接和用途，不要把链接内容写成已验证事实
 9. `默认输出到当前工作目录`
    - 用户未指定路径时，不要擅自改成别的目录名
+10. `前端友好的结构化输出`
+   - 除 Markdown 外，还要补齐 `.persona-system/render-profile.json`
+   - `能力地图.md` 需要包含 `核心能力总览` 表，列至少有：`能力 | 当前判断 | 置信度 | 图标 | 关键词`
+   - `render-profile.json` 至少要有：`generation_context`、`profile_facets`、`keyword_chips`、`focus_items`、`work_style_items`、`value_cards`、`capability_metrics`、`project_capability_matrix`、`public_summary`
 
 ## 标准流程
 

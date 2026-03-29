@@ -2,6 +2,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import json
 from pathlib import Path
 import unittest
 from urllib.parse import quote
@@ -270,6 +271,94 @@ class PersonaVaultStaticSiteTest(unittest.TestCase):
         self.assertIn("主要人物画像", html)
         self.assertIn("PersonaVault 交互式生成器", html)
         self.assertIn("能力-交互式工具设计", html)
+
+    def test_renderer_prefers_render_profile_json(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        output_dir = Path(tempfile.mkdtemp(prefix="persona-site-json-"))
+        vault_dir = Path(tempfile.mkdtemp(prefix="persona-vault-json-"))
+        script_path = (
+            repo_root
+            / "skills"
+            / "persona-vault-static-site"
+            / "scripts"
+            / "render_persona_site.py"
+        )
+
+        (vault_dir / "00 - Profile").mkdir(parents=True)
+        (vault_dir / "01 - Capabilities").mkdir(parents=True)
+        (vault_dir / "02 - Projects").mkdir(parents=True)
+        (vault_dir / ".persona-system").mkdir(parents=True)
+        (vault_dir / "Home.md").write_text("# Home\n", encoding="utf-8")
+        (vault_dir / "00 - Profile" / "主要人物画像.md").write_text("# 主要人物画像\n", encoding="utf-8")
+        (vault_dir / ".persona-system" / "render-profile.json").write_text(
+            json.dumps(
+                {
+                    "generation_context": {
+                        "target_scene": "job_jd",
+                        "job_jd_text": "AI Agent 岗位",
+                        "focus_presets": ["能力亮点"],
+                        "focus_custom": "强调复杂工作流",
+                        "redaction_profile": "conservative",
+                        "redaction_custom_rules": "不要写真实公司名",
+                    },
+                    "profile_facets": [
+                        {
+                            "icon": "briefcase",
+                            "title": "岗位叙事重心",
+                            "summary": "围绕 Agent 工作流与交付抽象展开。",
+                        }
+                    ],
+                    "keyword_chips": ["Agent 工作流", "证据驱动"],
+                    "focus_items": ["Agent 工作流抽象"],
+                    "work_style_items": ["先定约束，再落计划"],
+                    "value_cards": [
+                        {"title": "证据优先", "description": "先验证，再表述。"}
+                    ],
+                    "capability_metrics": [
+                        {
+                            "title": "能力-Agent交付封装",
+                            "short_title": "Agent交付封装",
+                            "icon": "wrench",
+                            "judgment": "已形成稳定能力",
+                            "confidence": "高",
+                            "score": 90,
+                        }
+                    ],
+                    "project_capability_matrix": [
+                        {
+                            "title": "项目-Context OS Demo",
+                            "capabilities": ["能力-Agent交付封装"],
+                        }
+                    ],
+                    "public_summary": [
+                        "擅长把复杂工作流转成可交付资产。"
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(script_path),
+                "--persona-vault-path",
+                str(vault_dir),
+                "--output-dir",
+                str(output_dir),
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        html = (output_dir / "index.html").read_text(encoding="utf-8")
+        self.assertIn("关键人物画像", html)
+        self.assertIn("岗位叙事重心", html)
+        self.assertIn("Agent 工作流", html)
+        self.assertIn("Agent交付封装", html)
+        self.assertNotIn("No capability radar available.", html)
 
 
 if __name__ == "__main__":

@@ -105,6 +105,89 @@
               class="mt-3 w-full rounded-[1.25rem] border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-800 outline-none transition focus:border-stone-400 focus:bg-white"
             />
           </section>
+
+          <section class="mt-8 rounded-[1.5rem] border border-stone-200 bg-stone-50/70 p-5">
+            <button
+              type="button"
+              id="toggle-advanced-settings"
+              class="flex w-full items-center justify-between text-left"
+            >
+              <div>
+                <div class="text-sm font-medium text-stone-900">5. 高级设置</div>
+                <p class="mt-1 text-sm text-stone-500">默认面向岗位/JD场景，可配置 focus、脱敏和 JD 约束。</p>
+              </div>
+              <span id="advanced-settings-indicator" class="rounded-full border border-stone-200 bg-white px-3 py-1 text-xs font-medium text-stone-600">展开</span>
+            </button>
+
+            <div id="advanced-settings" class="mt-5 hidden space-y-5">
+              <section>
+                <label class="block text-sm font-medium text-stone-900" for="target_scene">针对场景</label>
+                <select
+                  id="target_scene"
+                  name="target_scene"
+                  class="mt-3 w-full rounded-[1.25rem] border border-stone-200 bg-white px-4 py-3 text-sm text-stone-800 outline-none transition focus:border-stone-400"
+                >
+                  <option value="job_jd">岗位/JD</option>
+                </select>
+              </section>
+
+              <section>
+                <label class="block text-sm font-medium text-stone-900" for="job_jd_text">岗位 JD / 场景要求</label>
+                <textarea
+                  id="job_jd_text"
+                  name="job_jd_text"
+                  rows="5"
+                  placeholder="粘贴岗位描述、岗位要求或你希望这次画像更贴近的场景约束"
+                  class="mt-3 w-full rounded-[1.25rem] border border-stone-200 bg-white px-4 py-3 text-sm text-stone-800 outline-none transition focus:border-stone-400"
+                ></textarea>
+              </section>
+
+              <section>
+                <div class="text-sm font-medium text-stone-900">Focus 预设</div>
+                <div class="mt-3 grid gap-3 md:grid-cols-2">
+                  <label class="rounded-[1.15rem] border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700"><input class="mr-2" type="checkbox" name="focus_presets" value="能力亮点" />能力亮点</label>
+                  <label class="rounded-[1.15rem] border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700"><input class="mr-2" type="checkbox" name="focus_presets" value="代表项目" />代表项目</label>
+                  <label class="rounded-[1.15rem] border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700"><input class="mr-2" type="checkbox" name="focus_presets" value="工作经历" />工作经历</label>
+                  <label class="rounded-[1.15rem] border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700"><input class="mr-2" type="checkbox" name="focus_presets" value="领域方向" />领域方向</label>
+                  <label class="rounded-[1.15rem] border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700"><input class="mr-2" type="checkbox" name="focus_presets" value="业务结果" />业务结果</label>
+                  <label class="rounded-[1.15rem] border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700"><input class="mr-2" type="checkbox" name="focus_presets" value="协作风格" />协作风格</label>
+                </div>
+              </section>
+
+              <section>
+                <label class="block text-sm font-medium text-stone-900" for="focus_custom">自定义 Focus</label>
+                <input
+                  id="focus_custom"
+                  name="focus_custom"
+                  type="text"
+                  placeholder="例如：强调复杂工作流抽象能力与可交付完成度"
+                  class="mt-3 w-full rounded-[1.25rem] border border-stone-200 bg-white px-4 py-3 text-sm text-stone-800 outline-none transition focus:border-stone-400"
+                />
+              </section>
+
+              <section>
+                <label class="block text-sm font-medium text-stone-900" for="redaction_profile">脱敏策略</label>
+                <select
+                  id="redaction_profile"
+                  name="redaction_profile"
+                  class="mt-3 w-full rounded-[1.25rem] border border-stone-200 bg-white px-4 py-3 text-sm text-stone-800 outline-none transition focus:border-stone-400"
+                >
+                  <option value="conservative">conservative</option>
+                </select>
+              </section>
+
+              <section>
+                <label class="block text-sm font-medium text-stone-900" for="redaction_custom_rules">自定义脱敏原则</label>
+                <textarea
+                  id="redaction_custom_rules"
+                  name="redaction_custom_rules"
+                  rows="4"
+                  placeholder="例如：能写开源项目，不能写真实公司名、内部指标和未公开合作方"
+                  class="mt-3 w-full rounded-[1.25rem] border border-stone-200 bg-white px-4 py-3 text-sm text-stone-800 outline-none transition focus:border-stone-400"
+                ></textarea>
+              </section>
+            </div>
+          </section>
         </form>
 
         <aside class="rounded-[2rem] border border-stone-200 bg-white/92 p-7 shadow-sm">
@@ -232,8 +315,9 @@
       const siteUrlNode = document.getElementById("site-url");
       const openSiteButton = document.getElementById("open-site");
       const openObsidianButton = document.getElementById("open-obsidian");
+      const advancedSettingsNode = document.getElementById("advanced-settings");
+      const advancedSettingsIndicator = document.getElementById("advanced-settings-indicator");
       let currentJob = null;
-      let pendingRedirect = null;
 
       function appendTemplate(container, template) {
         const fragment = template.content.cloneNode(true);
@@ -255,10 +339,6 @@
       }
 
       function setPanelState(target) {
-        if (pendingRedirect) {
-          clearTimeout(pendingRedirect);
-          pendingRedirect = null;
-        }
         [idlePanel, jobPanel, successPanel, errorPanel].forEach((panel) => panel.classList.add("hidden"));
         target.classList.remove("hidden");
       }
@@ -275,16 +355,11 @@
 
         if (data.status === "completed") {
           currentJob = data;
-          successMessageNode.textContent = data.site_url
-            ? `${data.message} 即将跳转到网页预览。`
-            : data.message;
+          successMessageNode.textContent = data.message || "PersonaVault 已生成完成。";
           vaultPathNode.textContent = data.vault_path || "";
           profilePathNode.textContent = data.profile_path || "";
           siteUrlNode.textContent = data.site_url || "";
           setPanelState(successPanel);
-          if (data.site_url) {
-            pendingRedirect = setTimeout(() => window.location.assign(data.site_url), 900);
-          }
           return;
         }
 
@@ -294,6 +369,10 @@
 
       document.getElementById("add-path-mapping").addEventListener("click", () => appendTemplate(pathMappings, pathTemplate));
       document.getElementById("add-link").addEventListener("click", () => appendTemplate(links, linkTemplate));
+      document.getElementById("toggle-advanced-settings").addEventListener("click", () => {
+        advancedSettingsNode.classList.toggle("hidden");
+        advancedSettingsIndicator.textContent = advancedSettingsNode.classList.contains("hidden") ? "展开" : "收起";
+      });
       appendTemplate(pathMappings, pathTemplate);
       appendTemplate(links, linkTemplate);
 
@@ -304,6 +383,14 @@
           path_mappings: collectRows(pathMappings),
           links: collectRows(links),
           output_dir: document.getElementById("output_dir").value.trim(),
+          advanced_settings: {
+            target_scene: document.getElementById("target_scene").value,
+            job_jd_text: document.getElementById("job_jd_text").value.trim(),
+            focus_presets: Array.from(form.querySelectorAll('input[name="focus_presets"]:checked')).map((node) => node.value),
+            focus_custom: document.getElementById("focus_custom").value.trim(),
+            redaction_profile: document.getElementById("redaction_profile").value,
+            redaction_custom_rules: document.getElementById("redaction_custom_rules").value.trim(),
+          },
         };
 
         const response = await fetch("/api/generate", {

@@ -48,6 +48,7 @@ PersonaVault/
     embeddings/
     cache/
     sync-state.json
+    render-profile.json
 ```
 
 ## 目录职责
@@ -72,6 +73,7 @@ PersonaVault/
   - 处理过程和异常日志
 - `.persona-system/`
   - 只给机器使用，不给人做主界面
+  - `render-profile.json` 用于静态站和前端直接消费的结构化画像数据
 
 ## 写作约束
 

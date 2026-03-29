@@ -46,6 +46,7 @@ description: Use when a local PersonaVault needs to be exported into a minimal l
 
 默认读取以下内容：
 
+- `.persona-system/render-profile.json`
 - `Home.md`
 - `00 - Profile/主要人物画像.md`
 - `00 - Profile/About Me.md`
@@ -87,6 +88,7 @@ description: Use when a local PersonaVault needs to be exported into a minimal l
 ## 内容规则
 
 1. 只展示核心画像
+   - 优先读取 `.persona-system/render-profile.json` 里的结构化画像数据
    - 优先读取 `主要人物画像.md`
    - 若缺失，再回退到 `About Me.md`
    - 读取画像、能力、项目卡片

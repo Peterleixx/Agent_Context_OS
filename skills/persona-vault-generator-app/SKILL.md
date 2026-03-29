@@ -10,11 +10,13 @@ description: Use when a local browser-based UI is needed to collect PersonaVault
 - 需要一个本地服务而不是命令行来组织 `PersonaVault` 生成输入
 - 需要多选 `Codex` / `Claude Code` 聊天记录来源
 - 需要让用户动态添加本地路径映射、外部链接和输出目录
-- 需要在浏览器中查看生成中状态，并在完成后自动进入网页预览，再打开 `Obsidian`
+- 需要在浏览器中查看生成中状态，并在完成后保留当前页的成功态，再决定是否打开网页预览或 `Obsidian`
 
 ## 核心目标
 
 提供一个本地浏览器界面，把输入整理成结构化请求，再交给本机 `codex exec` 执行完整 `PersonaVault` 生成任务，并串联静态站导出。
+
+页面应支持高级设置，尤其是 `岗位/JD` 场景下的 `focus`、`岗位要求` 和 `脱敏原则`。
 
 ## 启动方式
 
@@ -28,7 +30,9 @@ python3 skills/persona-vault-generator-app/scripts/run_persona_vault_generator_a
 
 - 页面使用 Tailwind CSS CDN
 - 后端固定通过本机 `codex exec --model gpt-5.4 -c model_reasoning_effort="medium"` 执行任务
+- `advanced_settings` 需要进入生成 payload，并写入第一阶段产物中的结构化配置
 - 外部链接默认只记录为来源，不抓取正文
 - 生成完成后自动调用 `persona-vault-static-site` 导出网页预览
-- 前端优先跳转到导出的本地网页界面
+- 第一阶段需要补齐 `.persona-system/render-profile.json` 和前端友好的画像结构
+- 前端成功态保留在第一页，只提供“打开网页预览”入口，不自动跳转
 - 页面内仍保留一键调用本机 `Obsidian`
