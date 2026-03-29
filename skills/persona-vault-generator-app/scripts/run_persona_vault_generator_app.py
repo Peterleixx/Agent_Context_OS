@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import html as html_lib
 import importlib.util
 import json
 import os
@@ -25,6 +26,10 @@ from urllib.request import Request, urlopen
 DEFAULT_JOB_MESSAGE = "正在调用本机 Codex 执行 PersonaVault 生成任务"
 DEFAULT_EDIT_MESSAGE = "正在应用自然语言修改并同步 PersonaVault 与网页预览。"
 GITHUB_FETCH_TIMEOUT_SECONDS = 8.0
+DEFAULT_CODEX_MODEL = "gpt-5.4-mini"
+DEFAULT_CODEX_REASONING_EFFORT = "low"
+VALID_CODEX_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
+CODEX_EXEC_TIMEOUT_SECONDS = int(os.environ.get("PERSONA_VAULT_CODEX_TIMEOUT_SECONDS", "600"))
 FOCUS_PRESET_LABELS = [
     "能力亮点",
     "代表项目",
@@ -100,6 +105,88 @@ def parse_codex_output_lines(lines: list[str]) -> list[dict[str, Any]]:
         if isinstance(parsed, dict):
             events.append(parsed)
     return events
+
+
+def extract_rate_limit_reset_time(output_lines: list[str]) -> datetime | None:
+    for event in reversed(parse_codex_output_lines(output_lines)):
+        if str(event.get("type", "")).strip() != "event_msg":
+            continue
+        payload = event.get("payload", {})
+        if not isinstance(payload, dict):
+            continue
+        rate_limits = payload.get("rate_limits", {})
+        if not isinstance(rate_limits, dict):
+            continue
+        primary = rate_limits.get("primary", {})
+        if not isinstance(primary, dict):
+            continue
+        try:
+            used_percent = float(primary.get("used_percent", 0) or 0)
+        except (TypeError, ValueError):
+            used_percent = 0
+        if used_percent < 100:
+            continue
+        resets_at = primary.get("resets_at")
+        try:
+            return datetime.fromtimestamp(float(resets_at), tz=timezone.utc).astimezone()
+        except (TypeError, ValueError, OSError):
+            continue
+    return None
+
+
+def build_codex_timeout_message(
+    output_lines: list[str],
+    timeout_seconds: int = CODEX_EXEC_TIMEOUT_SECONDS,
+) -> str:
+    reset_time = extract_rate_limit_reset_time(output_lines)
+    if reset_time is not None:
+        return (
+            "Codex 调用超时，当前账户已触发限流，预计在 "
+            f"{reset_time.strftime('%Y-%m-%d %H:%M:%S %Z')} 后恢复。"
+        )
+    return f"Codex 调用超时，超过 {timeout_seconds} 秒仍未完成。"
+
+
+def resolve_codex_runtime_config() -> dict[str, str]:
+    model = str(os.environ.get("PERSONA_VAULT_CODEX_MODEL", "")).strip() or DEFAULT_CODEX_MODEL
+    reasoning_effort = (
+        str(os.environ.get("PERSONA_VAULT_CODEX_REASONING_EFFORT", "")).strip().lower()
+        or DEFAULT_CODEX_REASONING_EFFORT
+    )
+    if reasoning_effort not in VALID_CODEX_REASONING_EFFORTS:
+        reasoning_effort = DEFAULT_CODEX_REASONING_EFFORT
+    return {
+        "model": model,
+        "reasoning_effort": reasoning_effort,
+    }
+
+
+def run_codex_command(
+    command: list[str],
+    prompt: str,
+    cwd: Path,
+    timeout_seconds: int = CODEX_EXEC_TIMEOUT_SECONDS,
+) -> tuple[int, list[str]]:
+    try:
+        result = subprocess.run(
+            command,
+            cwd=str(cwd),
+            input=prompt,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        output = exc.stdout if exc.stdout is not None else exc.output
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
+        output_lines = str(output or "").splitlines()
+        raise RuntimeError(build_codex_timeout_message(output_lines, timeout_seconds)) from exc
+    except OSError as exc:
+        raise RuntimeError(f"启动 Codex 失败: {exc}") from exc
+
+    return result.returncode, [line.rstrip("\n") for line in (result.stdout or "").splitlines()]
 
 
 def extract_github_owner(url: str) -> str | None:
@@ -204,14 +291,18 @@ def enrich_payload_with_github_data(payload: dict[str, Any]) -> dict[str, Any]:
     return enriched
 
 
-def build_codex_command(output_last_message_path: Path) -> list[str]:
+def build_codex_command(
+    output_last_message_path: Path,
+    codex_runtime_config: dict[str, str] | None = None,
+) -> list[str]:
+    config = codex_runtime_config or resolve_codex_runtime_config()
     return [
         "codex",
         "exec",
         "--model",
-        "gpt-5.4",
+        config["model"],
         "-c",
-        'model_reasoning_effort="medium"',
+        f'model_reasoning_effort="{config["reasoning_effort"]}"',
         "-s",
         "danger-full-access",
         "--skip-git-repo-check",
@@ -592,9 +683,15 @@ class JobState:
 
 
 class CodexPersonaJobRunner:
-    def __init__(self, repo_root: Path, working_directory: Path):
+    def __init__(
+        self,
+        repo_root: Path,
+        working_directory: Path,
+        codex_runtime_config: dict[str, str] | None = None,
+    ):
         self.repo_root = repo_root
         self.working_directory = working_directory
+        self.codex_runtime_config = codex_runtime_config or resolve_codex_runtime_config()
         self._jobs: dict[str, JobState] = {}
         self._lock = threading.Lock()
 
@@ -943,26 +1040,26 @@ class CodexPersonaJobRunner:
 
         with tempfile.TemporaryDirectory(prefix="persona-vault-job-") as tmp_dir:
             last_message_path = Path(tmp_dir) / "last-message.txt"
-            command = build_codex_command(last_message_path)
+            command = build_codex_command(last_message_path, self.codex_runtime_config)
 
             self._update_job(job_id, stage="running_codex", message=DEFAULT_JOB_MESSAGE)
-            process = subprocess.Popen(
-                command,
-                cwd=str(self.working_directory),
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
-            assert process.stdin is not None
-            assert process.stdout is not None
-            process.stdin.write(prompt)
-            process.stdin.close()
-
-            output_lines: list[str] = []
-            for line in process.stdout:
-                output_lines.append(line.rstrip("\n"))
-            return_code = process.wait()
+            try:
+                return_code, output_lines = run_codex_command(
+                    command,
+                    prompt,
+                    self.working_directory,
+                )
+            except RuntimeError as exc:
+                final_message = ""
+                if last_message_path.exists():
+                    final_message = last_message_path.read_text(encoding="utf-8").strip()
+                self._update_job(
+                    job_id,
+                    status="failed",
+                    stage="failed",
+                    message=final_message or str(exc),
+                )
+                return
 
             self._update_job(job_id, stage="writing_vault", message="正在核对 PersonaVault 输出结构。")
 
@@ -1171,26 +1268,29 @@ class CodexPersonaJobRunner:
         prompt = build_edit_prompt(self.repo_root, vault_path, instruction)
         with tempfile.TemporaryDirectory(prefix="persona-vault-edit-") as tmp_dir:
             last_message_path = Path(tmp_dir) / "last-message.txt"
-            command = build_codex_command(last_message_path)
+            command = build_codex_command(last_message_path, self.codex_runtime_config)
 
             self._update_job(job_id, stage="running_codex", message=DEFAULT_EDIT_MESSAGE)
-            process = subprocess.Popen(
-                command,
-                cwd=str(vault_path),
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
-            assert process.stdin is not None
-            assert process.stdout is not None
-            process.stdin.write(prompt)
-            process.stdin.close()
-
-            output_lines: list[str] = []
-            for line in process.stdout:
-                output_lines.append(line.rstrip("\n"))
-            return_code = process.wait()
+            try:
+                return_code, output_lines = run_codex_command(
+                    command,
+                    prompt,
+                    vault_path,
+                )
+            except RuntimeError as exc:
+                profile_path = vault_path / "00 - Profile" / "主要人物画像.md"
+                final_message = ""
+                if last_message_path.exists():
+                    final_message = last_message_path.read_text(encoding="utf-8").strip()
+                self._update_job(
+                    job_id,
+                    status="failed",
+                    stage="failed",
+                    message=final_message or str(exc),
+                    vault_path=str(vault_path),
+                    profile_path=str(profile_path),
+                )
+                return
 
             profile_path = vault_path / "00 - Profile" / "主要人物画像.md"
             final_message = ""
@@ -1309,6 +1409,13 @@ class AppHandler(BaseHTTPRequestHandler):
             / "index.html"
         )
         html = template_path.read_text(encoding="utf-8")
+        html = html.replace(
+            "__CODEX_MODEL__",
+            html_lib.escape(self.server.codex_runtime_config["model"]),
+        ).replace(
+            "__CODEX_REASONING_EFFORT__",
+            html_lib.escape(self.server.codex_runtime_config["reasoning_effort"]),
+        )
         encoded = html.encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -1352,6 +1459,7 @@ class PersonaGeneratorServer(ThreadingHTTPServer):
         obsidian_opener: Any,
         path_opener: Any,
         working_directory: Path,
+        codex_runtime_config: dict[str, str],
     ) -> None:
         super().__init__(server_address, handler_class)
         self.repo_root = repo_root
@@ -1359,6 +1467,7 @@ class PersonaGeneratorServer(ThreadingHTTPServer):
         self.obsidian_opener = obsidian_opener
         self.path_opener = path_opener
         self.working_directory = working_directory
+        self.codex_runtime_config = codex_runtime_config
 
 
 def create_server(
@@ -1369,7 +1478,9 @@ def create_server(
     obsidian_opener: Any,
     path_opener: Any,
     working_directory: Path,
+    codex_runtime_config: dict[str, str] | None = None,
 ) -> PersonaGeneratorServer:
+    resolved_codex_runtime_config = codex_runtime_config or resolve_codex_runtime_config()
     return PersonaGeneratorServer(
         (host, port),
         AppHandler,
@@ -1378,6 +1489,7 @@ def create_server(
         obsidian_opener,
         path_opener,
         working_directory.resolve(),
+        resolved_codex_runtime_config,
     )
 
 
@@ -1385,7 +1497,8 @@ def main() -> int:
     args = parse_args()
     repo_root = Path(__file__).resolve().parents[3]
     working_directory = Path(args.working_directory).expanduser().resolve()
-    runner = CodexPersonaJobRunner(repo_root, working_directory)
+    codex_runtime_config = resolve_codex_runtime_config()
+    runner = CodexPersonaJobRunner(repo_root, working_directory, codex_runtime_config)
     server = create_server(
         args.host,
         args.port,
@@ -1394,6 +1507,7 @@ def main() -> int:
         open_obsidian_vault,
         open_local_path,
         working_directory,
+        codex_runtime_config,
     )
     url = f"http://{args.host}:{server.server_address[1]}"
     print(url, flush=True)
