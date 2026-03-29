@@ -321,6 +321,16 @@
             <div class="rounded-[1.75rem] border border-rose-200 bg-rose-50 p-6">
               <div class="text-lg font-semibold text-rose-900">生成失败</div>
               <p id="error-message" class="mt-3 text-sm leading-7 text-rose-800"></p>
+              <div id="retry-hint" class="mt-3 text-xs leading-6 text-rose-700"></div>
+              <div class="mt-5">
+                <button
+                  type="button"
+                  id="retry-job"
+                  class="hidden inline-flex items-center rounded-full bg-stone-900 px-5 py-3 text-sm font-medium text-white transition hover:bg-stone-700"
+                >
+                  失败后重试
+                </button>
+              </div>
             </div>
           </div>
         </aside>
@@ -381,6 +391,8 @@
       const messageNode = document.getElementById("job-message");
       const successMessageNode = document.getElementById("success-message");
       const errorMessageNode = document.getElementById("error-message");
+      const retryHintNode = document.getElementById("retry-hint");
+      const retryJobButton = document.getElementById("retry-job");
       const vaultPathNode = document.getElementById("vault-path");
       const profilePathNode = document.getElementById("profile-path");
       const siteUrlNode = document.getElementById("site-url");
@@ -436,6 +448,13 @@
         openClawDocsLink.href = data.openclaw_docs_url || "https://docs.openclaw.ai/start/openclaw";
       }
 
+      function updateRetryPanel(data) {
+        const canRetry = Boolean(data && data.job_id && data.retry_available);
+        retryJobButton.classList.toggle("hidden", !canRetry);
+        retryJobButton.textContent = data && data.retry_label ? data.retry_label : "失败后重试";
+        retryHintNode.textContent = canRetry ? "若已有中间产物，会优先从断点继续；否则自动回退到完整重跑。" : "";
+      }
+
       async function pollJob(jobId) {
         const response = await fetch(`/api/jobs/${jobId}`);
         const data = await response.json();
@@ -454,11 +473,14 @@
           siteUrlNode.textContent = data.site_url || "";
           editHintNode.textContent = "修改完成后会重新生成网页链接和当前页展示内容。";
           updateDeployPanel(data);
+          updateRetryPanel(null);
           setPanelState(successPanel);
           return;
         }
 
+        currentJob = data;
         errorMessageNode.textContent = data.message || "任务失败。";
+        updateRetryPanel(data);
         setPanelState(errorPanel);
       }
 
@@ -496,11 +518,15 @@
         const data = await response.json();
 
         if (!response.ok) {
+          currentJob = null;
           errorMessageNode.textContent = data.message || "请求失败。";
+          updateRetryPanel(null);
           setPanelState(errorPanel);
           return;
         }
 
+        currentJob = null;
+        updateRetryPanel(null);
         stageNode.textContent = "discovering_sources";
         messageNode.textContent = "正在准备本地生成任务。";
         setPanelState(jobPanel);
@@ -586,6 +612,28 @@
         stageNode.textContent = "running_codex";
         messageNode.textContent = "正在应用自然语言修改。";
         editHintNode.textContent = "修改任务已启动，稍后会回写当前成功面板。";
+        setPanelState(jobPanel);
+        pollJob(data.job_id);
+      });
+
+      retryJobButton.addEventListener("click", async () => {
+        if (!currentJob || !currentJob.job_id) return;
+        const response = await fetch("/api/retry", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ job_id: currentJob.job_id }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          errorMessageNode.textContent = data.message || "无法启动重试任务。";
+          updateRetryPanel(currentJob);
+          setPanelState(errorPanel);
+          return;
+        }
+
+        updateRetryPanel(null);
+        stageNode.textContent = "writing_vault";
+        messageNode.textContent = "正在启动重试任务。";
         setPanelState(jobPanel);
         pollJob(data.job_id);
       });
