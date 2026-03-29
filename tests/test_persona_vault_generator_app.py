@@ -32,11 +32,14 @@ class FakeRunner:
         self.last_payload = None
         self.last_edit = None
         self.last_deploy = None
+        self.last_retry = None
         self.job = {
             "job_id": "job_test",
             "status": "running",
             "stage": "running_codex",
             "message": "正在调用本机 Codex 执行 PersonaVault 生成任务",
+            "retry_available": False,
+            "retry_label": None,
         }
 
     def start_job(self, payload):
@@ -51,13 +54,28 @@ class FakeRunner:
         self.last_deploy = {"job_id": job_id}
         return "job_deploy"
 
+    def retry_job(self, job_id):
+        self.last_retry = {"job_id": job_id}
+        return "job_retry"
+
     def get_job(self, job_id):
+        if job_id == "job_retry":
+            return {
+                "job_id": "job_retry",
+                "status": "running",
+                "stage": "writing_vault",
+                "message": "正在从断点继续。",
+                "retry_available": False,
+                "retry_label": None,
+            }
         if job_id == "job_deploy":
             return {
                 "job_id": "job_deploy",
                 "status": "running",
                 "stage": "deploy_preparing_profile",
                 "message": "正在准备 OpenClaw 部署画像。",
+                "retry_available": False,
+                "retry_label": None,
             }
         if job_id == "job_edit":
             return {
@@ -65,6 +83,8 @@ class FakeRunner:
                 "status": "running",
                 "stage": "running_codex",
                 "message": "正在应用自然语言修改。",
+                "retry_available": False,
+                "retry_label": None,
             }
         if job_id != self.job["job_id"]:
             return None
@@ -219,6 +239,67 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
         self.assertEqual(job["status"], "failed")
         self.assertEqual(job["stage"], "failed")
         self.assertIn("Codex 调用超时", job["message"])
+
+    def test_retry_job_reuses_generation_payload_before_checkpoint(self):
+        module = load_generator_module()
+        repo_root = Path(__file__).resolve().parents[1]
+        runner = module.CodexPersonaJobRunner(repo_root, repo_root)
+        failed_job = module.JobState("job_failed")
+        failed_job.status = "failed"
+        failed_job.job_kind = "generate"
+        failed_job.retry_mode = "rerun_generate"
+        failed_job.retry_available = True
+        failed_job.request_payload = {"agents": ["codex"], "path_mappings": [], "links": []}
+        runner._jobs["job_failed"] = failed_job
+
+        with mock.patch.object(runner, "start_job", return_value="job_retry") as mocked_start:
+            retry_job_id = runner.retry_job("job_failed")
+
+        self.assertEqual(retry_job_id, "job_retry")
+        mocked_start.assert_called_once_with({"agents": ["codex"], "path_mappings": [], "links": []}, "job_failed")
+
+    def test_retry_job_resumes_outputs_when_checkpoint_available(self):
+        module = load_generator_module()
+        repo_root = Path(__file__).resolve().parents[1]
+        runner = module.CodexPersonaJobRunner(repo_root, repo_root)
+        failed_job = module.JobState("job_failed")
+        failed_job.status = "failed"
+        failed_job.job_kind = "generate"
+        failed_job.retry_mode = "resume_outputs"
+        failed_job.retry_available = True
+        failed_job.request_payload = {"agents": ["codex"], "path_mappings": [], "links": []}
+        failed_job.vault_path = "/tmp/PersonaVault"
+        failed_job.profile_path = "/tmp/PersonaVault/00 - Profile/主要人物画像.md"
+        runner._jobs["job_failed"] = failed_job
+
+        with mock.patch.object(runner, "start_resume_outputs_job", return_value="job_resume") as mocked_resume:
+            retry_job_id = runner.retry_job("job_failed")
+
+        self.assertEqual(retry_job_id, "job_resume")
+        mocked_resume.assert_called_once_with(
+            Path("/tmp/PersonaVault"),
+            Path("/tmp/PersonaVault/00 - Profile/主要人物画像.md"),
+            {"agents": ["codex"], "path_mappings": [], "links": []},
+            "job_failed",
+        )
+
+    def test_run_resume_outputs_job_reuses_refresh_pipeline(self):
+        module = load_generator_module()
+        repo_root = Path(__file__).resolve().parents[1]
+        runner = module.CodexPersonaJobRunner(repo_root, repo_root)
+        runner._jobs["job_resume"] = module.JobState("job_resume")
+
+        payload = {"agents": ["codex"], "path_mappings": [], "links": []}
+        vault_path = Path("/tmp/PersonaVault")
+        profile_path = Path("/tmp/PersonaVault/00 - Profile/主要人物画像.md")
+
+        with mock.patch.object(runner, "_refresh_persona_outputs", return_value=True) as mocked_refresh:
+            runner._run_resume_outputs_job("job_resume", vault_path, profile_path, payload)
+
+        job = runner.get_job("job_resume")
+        self.assertEqual(job["stage"], "writing_vault")
+        self.assertEqual(job["message"], "正在从断点继续同步结构化画像与网页预览。")
+        mocked_refresh.assert_called_once_with("job_resume", vault_path, profile_path, payload)
 
     def test_resolve_codex_runtime_config_uses_defaults_and_sanitizes_reasoning(self):
         module = load_generator_module()
@@ -714,6 +795,7 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
             self.assertIn("job_jd_text", html)
             self.assertIn("redaction_custom_rules", html)
             self.assertIn("自然语言修改 / 重写", html)
+            self.assertIn("retry-job", html)
 
             payload = {
                 "agents": ["codex"],
@@ -775,6 +857,18 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
             )
             self.assertEqual(deploy_response["job_id"], "job_deploy")
             self.assertEqual(runner.last_deploy["job_id"], "job_test")
+
+            retry_request = urllib.request.Request(
+                f"{base_url}/api/retry",
+                data=json.dumps({"job_id": "job_test"}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            retry_response = json.loads(
+                urllib.request.urlopen(retry_request).read().decode("utf-8")
+            )
+            self.assertEqual(retry_response["job_id"], "job_retry")
+            self.assertEqual(runner.last_retry["job_id"], "job_test")
 
             open_request = urllib.request.Request(
                 f"{base_url}/api/open-obsidian",

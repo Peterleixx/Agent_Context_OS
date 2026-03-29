@@ -666,6 +666,7 @@ def open_local_path(target_path: str) -> dict[str, Any]:
 class JobState:
     def __init__(self, job_id: str) -> None:
         self.job_id = job_id
+        self.job_kind: str | None = None
         self.source_job_id: str | None = None
         self.status = "running"
         self.stage = "discovering_sources"
@@ -678,6 +679,11 @@ class JobState:
         self.openclaw_agent_id: str | None = None
         self.openclaw_workspace_path: str | None = None
         self.openclaw_docs_url: str | None = None
+        self.request_payload: dict[str, Any] | None = None
+        self.edit_instruction: str | None = None
+        self.retry_mode: str | None = None
+        self.retry_available = False
+        self.retry_label: str | None = None
         self.raw_output: list[str] = []
 
     def to_dict(self) -> dict[str, Any]:
@@ -695,6 +701,8 @@ class JobState:
             "openclaw_agent_id": self.openclaw_agent_id,
             "openclaw_workspace_path": self.openclaw_workspace_path,
             "openclaw_docs_url": self.openclaw_docs_url,
+            "retry_available": self.retry_available,
+            "retry_label": self.retry_label,
         }
 
 
@@ -711,14 +719,53 @@ class CodexPersonaJobRunner:
         self._jobs: dict[str, JobState] = {}
         self._lock = threading.Lock()
 
-    def start_job(self, payload: dict[str, Any]) -> str:
+    def _clone_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return json.loads(json.dumps(payload, ensure_ascii=False))
+
+    def _get_job_state(self, job_id: str) -> JobState | None:
+        with self._lock:
+            return self._jobs.get(job_id)
+
+    def start_job(self, payload: dict[str, Any], source_job_id: str | None = None) -> str:
         job_id = f"job_{uuid.uuid4().hex[:10]}"
         state = JobState(job_id=job_id)
+        state.job_kind = "generate"
+        state.source_job_id = source_job_id
+        state.request_payload = self._clone_payload(payload)
+        state.retry_mode = "rerun_generate"
+        state.retry_available = True
+        state.retry_label = "重新生成"
         with self._lock:
             self._jobs[job_id] = state
         thread = threading.Thread(target=self._run_job, args=(job_id, payload), daemon=True)
         thread.start()
         return job_id
+
+    def start_edit_job_from_vault(
+        self,
+        vault_path: Path,
+        instruction: str,
+        source_job_id: str | None = None,
+    ) -> str:
+        edit_job_id = f"job_{uuid.uuid4().hex[:10]}"
+        state = JobState(job_id=edit_job_id)
+        state.job_kind = "edit"
+        state.source_job_id = source_job_id
+        state.vault_path = str(vault_path)
+        state.profile_path = str(vault_path / "00 - Profile" / "主要人物画像.md")
+        state.edit_instruction = instruction
+        state.retry_mode = "rerun_edit"
+        state.retry_available = True
+        state.retry_label = "重新执行修改"
+        with self._lock:
+            self._jobs[edit_job_id] = state
+        thread = threading.Thread(
+            target=self._run_edit_job,
+            args=(edit_job_id, vault_path, instruction),
+            daemon=True,
+        )
+        thread.start()
+        return edit_job_id
 
     def start_edit_job(self, job_id: str, instruction: str) -> str:
         source_job = self.get_job(job_id)
@@ -727,21 +774,38 @@ class CodexPersonaJobRunner:
         vault_path = str(source_job.get("vault_path", "")).strip()
         if not vault_path:
             raise ValueError("job has no generated PersonaVault")
-        edit_job_id = f"job_{uuid.uuid4().hex[:10]}"
-        state = JobState(job_id=edit_job_id)
-        state.vault_path = vault_path
-        state.profile_path = str(source_job.get("profile_path", "")).strip() or None
-        state.site_path = str(source_job.get("site_path", "")).strip() or None
-        state.site_url = str(source_job.get("site_url", "")).strip() or None
+        edit_job_id = self.start_edit_job_from_vault(Path(vault_path), instruction, job_id)
+        self._update_job(
+            edit_job_id,
+            profile_path=str(source_job.get("profile_path", "")).strip() or None,
+            site_path=str(source_job.get("site_path", "")).strip() or None,
+            site_url=str(source_job.get("site_url", "")).strip() or None,
+        )
+        return edit_job_id
+
+    def start_deploy_job_from_vault(
+        self,
+        vault_path: Path,
+        source_job_id: str | None = None,
+    ) -> str:
+        deploy_job_id = f"job_{uuid.uuid4().hex[:10]}"
+        state = JobState(job_id=deploy_job_id)
+        state.job_kind = "deploy"
+        state.source_job_id = source_job_id
+        state.vault_path = str(vault_path)
+        state.profile_path = str(vault_path / "00 - Profile" / "主要人物画像.md")
+        state.retry_mode = "rerun_deploy"
+        state.retry_available = True
+        state.retry_label = "重试部署"
         with self._lock:
-            self._jobs[edit_job_id] = state
+            self._jobs[deploy_job_id] = state
         thread = threading.Thread(
-            target=self._run_edit_job,
-            args=(edit_job_id, Path(vault_path), instruction),
+            target=self._run_deploy_job,
+            args=(deploy_job_id, vault_path),
             daemon=True,
         )
         thread.start()
-        return edit_job_id
+        return deploy_job_id
 
     def start_deploy_job(self, job_id: str) -> str:
         source_job = self.get_job(job_id)
@@ -750,22 +814,75 @@ class CodexPersonaJobRunner:
         vault_path = str(source_job.get("vault_path", "")).strip()
         if not vault_path:
             raise ValueError("job has no generated PersonaVault")
-        deploy_job_id = f"job_{uuid.uuid4().hex[:10]}"
-        state = JobState(job_id=deploy_job_id)
-        state.source_job_id = job_id
-        state.vault_path = vault_path
-        state.profile_path = str(source_job.get("profile_path", "")).strip() or None
-        state.site_path = str(source_job.get("site_path", "")).strip() or None
-        state.site_url = str(source_job.get("site_url", "")).strip() or None
+        deploy_job_id = self.start_deploy_job_from_vault(Path(vault_path), job_id)
+        self._update_job(
+            deploy_job_id,
+            profile_path=str(source_job.get("profile_path", "")).strip() or None,
+            site_path=str(source_job.get("site_path", "")).strip() or None,
+            site_url=str(source_job.get("site_url", "")).strip() or None,
+        )
+        return deploy_job_id
+
+    def start_resume_outputs_job(
+        self,
+        vault_path: Path,
+        profile_path: Path,
+        payload: dict[str, Any] | None,
+        source_job_id: str | None = None,
+    ) -> str:
+        resume_job_id = f"job_{uuid.uuid4().hex[:10]}"
+        state = JobState(job_id=resume_job_id)
+        state.job_kind = "generate" if payload is not None else "edit"
+        state.source_job_id = source_job_id
+        state.vault_path = str(vault_path)
+        state.profile_path = str(profile_path)
+        state.request_payload = self._clone_payload(payload) if payload is not None else None
+        state.retry_mode = "resume_outputs"
+        state.retry_available = True
+        state.retry_label = "从断点重试"
         with self._lock:
-            self._jobs[deploy_job_id] = state
+            self._jobs[resume_job_id] = state
         thread = threading.Thread(
-            target=self._run_deploy_job,
-            args=(deploy_job_id, Path(vault_path)),
+            target=self._run_resume_outputs_job,
+            args=(resume_job_id, vault_path, profile_path, payload),
             daemon=True,
         )
         thread.start()
-        return deploy_job_id
+        return resume_job_id
+
+    def retry_job(self, job_id: str) -> str:
+        state = self._get_job_state(job_id)
+        if state is None:
+            raise ValueError("job not found")
+        if state.status != "failed":
+            raise ValueError("job is not failed")
+        if not state.retry_available or not state.retry_mode:
+            raise ValueError("job cannot be retried")
+
+        if state.retry_mode == "rerun_generate":
+            if not isinstance(state.request_payload, dict):
+                raise ValueError("missing payload for retry")
+            return self.start_job(self._clone_payload(state.request_payload), job_id)
+        if state.retry_mode == "resume_outputs":
+            if not state.vault_path or not state.profile_path:
+                raise ValueError("missing checkpoint for retry")
+            payload = self._clone_payload(state.request_payload) if isinstance(state.request_payload, dict) else None
+            return self.start_resume_outputs_job(
+                Path(state.vault_path),
+                Path(state.profile_path),
+                payload,
+                job_id,
+            )
+        if state.retry_mode == "rerun_edit":
+            if not state.vault_path or not state.edit_instruction:
+                raise ValueError("missing edit context for retry")
+            return self.start_edit_job_from_vault(Path(state.vault_path), state.edit_instruction, job_id)
+        if state.retry_mode == "rerun_deploy":
+            if not state.vault_path:
+                raise ValueError("missing deploy context for retry")
+            return self.start_deploy_job_from_vault(Path(state.vault_path), job_id)
+
+        raise ValueError("unknown retry mode")
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -915,6 +1032,8 @@ class CodexPersonaJobRunner:
                 message=f"补齐结构化画像数据失败: {exc}",
                 vault_path=str(vault_path),
                 profile_path=str(profile_path),
+                retry_available=True,
+                retry_label="从断点重试",
             )
             return False
 
@@ -929,6 +1048,8 @@ class CodexPersonaJobRunner:
                 message=site_result["message"],
                 vault_path=str(vault_path),
                 profile_path=str(profile_path),
+                retry_available=True,
+                retry_label="从断点重试",
             )
             return False
 
@@ -942,6 +1063,8 @@ class CodexPersonaJobRunner:
             site_path=str(site_path),
             site_url=f"/generated/{job_id}",
             can_open_obsidian=Path("/Applications/Obsidian.app").exists(),
+            retry_available=False,
+            retry_label=None,
         )
         return True
 
@@ -1049,6 +1172,7 @@ class CodexPersonaJobRunner:
     def _run_job(self, job_id: str, payload: dict[str, Any]) -> None:
         self._update_job(job_id, stage="discovering_sources", message="正在整理输入来源。")
         payload = enrich_payload_with_github_data(payload)
+        self._update_job(job_id, request_payload=self._clone_payload(payload))
         if normalize_payload(payload, self.working_directory).get("github_public_data"):
             self._update_job(job_id, stage="discovering_sources", message="正在抓取 GitHub 公开资料。")
         prompt = build_generation_prompt(self.repo_root, payload, self.working_directory)
@@ -1084,6 +1208,14 @@ class CodexPersonaJobRunner:
             if last_message_path.exists():
                 final_message = last_message_path.read_text(encoding="utf-8").strip()
             if return_code == 0 and vault_path.exists():
+                self._update_job(
+                    job_id,
+                    vault_path=str(vault_path),
+                    profile_path=str(profile_path),
+                    retry_mode="resume_outputs",
+                    retry_available=True,
+                    retry_label="从断点重试",
+                )
                 self._refresh_persona_outputs(job_id, vault_path, profile_path, payload)
                 if final_message and self.get_job(job_id) and self.get_job(job_id)["status"] == "completed":
                     self._update_job(job_id, message=final_message)
@@ -1096,6 +1228,25 @@ class CodexPersonaJobRunner:
                 stage="failed",
                 message=error_message,
             )
+
+    def _run_resume_outputs_job(
+        self,
+        job_id: str,
+        vault_path: Path,
+        profile_path: Path,
+        payload: dict[str, Any] | None,
+    ) -> None:
+        self._update_job(
+            job_id,
+            stage="writing_vault",
+            message="正在从断点继续同步结构化画像与网页预览。",
+            vault_path=str(vault_path),
+            profile_path=str(profile_path),
+            retry_mode="resume_outputs",
+            retry_available=True,
+            retry_label="从断点重试",
+        )
+        self._refresh_persona_outputs(job_id, vault_path, profile_path, payload)
 
     def _render_persona_site(self, vault_path: Path, site_dir: Path) -> dict[str, Any]:
         renderer_script_path = resolve_renderer_script_path(self.repo_root)
@@ -1277,6 +1428,8 @@ class CodexPersonaJobRunner:
             openclaw_agent_id=agent_id,
             openclaw_workspace_path=str(workspace_path),
             openclaw_docs_url=build_openclaw_docs_url(),
+            retry_available=False,
+            retry_label=None,
         )
 
     def _run_edit_job(self, job_id: str, vault_path: Path, instruction: str) -> None:
@@ -1314,6 +1467,14 @@ class CodexPersonaJobRunner:
                 final_message = last_message_path.read_text(encoding="utf-8").strip()
 
             if return_code == 0 and vault_path.exists():
+                self._update_job(
+                    job_id,
+                    vault_path=str(vault_path),
+                    profile_path=str(profile_path),
+                    retry_mode="resume_outputs",
+                    retry_available=True,
+                    retry_label="从断点重试",
+                )
                 refreshed = self._refresh_persona_outputs(job_id, vault_path, profile_path, None)
                 if refreshed and final_message:
                     self._update_job(job_id, message=final_message)
@@ -1409,6 +1570,20 @@ class AppHandler(BaseHTTPRequestHandler):
                 self._json_response({"message": str(exc)}, HTTPStatus.BAD_REQUEST)
                 return
             self._json_response({"job_id": deploy_job_id}, HTTPStatus.OK)
+            return
+
+        if self.path == "/api/retry":
+            payload = self._read_json_body()
+            job_id = str(payload.get("job_id", "")).strip()
+            if not job_id:
+                self._json_response({"message": "缺少 job_id。"}, HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                retry_job_id = self.server.runner.retry_job(job_id)
+            except ValueError as exc:
+                self._json_response({"message": str(exc)}, HTTPStatus.BAD_REQUEST)
+                return
+            self._json_response({"job_id": retry_job_id}, HTTPStatus.OK)
             return
 
         self._json_response({"message": "not found"}, HTTPStatus.NOT_FOUND)
