@@ -31,7 +31,7 @@ clone 后进入仓库目录，只需要两行：
 
 ## 可选环境配置
 
-如果需要改端口、host 或默认输出工作目录，可以复制 `.env.example` 为 `.env.local` 并填写：
+如果需要改端口、host、默认输出工作目录，或切换 Codex 运行档位，可以复制 `.env.example` 为 `.env.local` 并填写：
 
 ```bash
 cp .env.example .env.local
@@ -42,6 +42,15 @@ cp .env.example .env.local
 - `PERSONA_VAULT_HOST`
 - `PERSONA_VAULT_PORT`
 - `PERSONA_VAULT_WORKDIR`
+- `PERSONA_VAULT_CODEX_MODEL`
+- `PERSONA_VAULT_CODEX_REASONING_EFFORT`
+- `PERSONA_VAULT_CODEX_TIMEOUT_SECONDS`
+
+推荐的 demo 默认档位：
+
+- `PERSONA_VAULT_CODEX_MODEL=gpt-5.4-mini`
+- `PERSONA_VAULT_CODEX_REASONING_EFFORT=low`
+- 需要更稳的质量时，再切回 `gpt-5.4` 与更高推理强度
 
 这个仓库当前提供两套面向 Codex 的技能，用于构建 `Markdown-first` 的 `PersonaVault` 工作流：
 
@@ -53,7 +62,7 @@ cp .env.example .env.local
 - `persona-vault-generator-app`
   - 启动一个本地交互式服务
   - 通过浏览器收集 agent、多路径映射、外部链接和输出目录
-  - 由本机 `codex exec --model gpt-5.4` 执行完整 PersonaVault 生成
+  - 默认由本机 `codex exec --model gpt-5.4-mini -c model_reasoning_effort="low"` 执行完整 PersonaVault 生成
   - 生成完成后会在同一流程里直接导出网页预览链接
   - 对 `github` 类型链接，会先抓取公开主页与代表仓库摘要，再并入 PersonaVault 和网页预览
   - 成功态保留在首页，支持打开网页、打开 Obsidian，以及自然语言修改 / 重写

@@ -161,6 +161,80 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
         self.assertEqual(captured["url"], "https://api.github.com/users/openai")
         self.assertEqual(captured["timeout"], module.GITHUB_FETCH_TIMEOUT_SECONDS)
 
+    def test_build_codex_timeout_message_mentions_rate_limit_reset(self):
+        module = load_generator_module()
+
+        message = module.build_codex_timeout_message(
+            [
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "token_count",
+                            "rate_limits": {
+                                "primary": {
+                                    "used_percent": 100.0,
+                                    "resets_at": 1774769054,
+                                }
+                            },
+                        },
+                    }
+                )
+            ],
+            timeout_seconds=30,
+        )
+
+        self.assertIn("Codex 调用超时", message)
+        self.assertIn("2026-03-29 15:24:14", message)
+
+    def test_run_job_marks_failed_when_codex_exec_times_out(self):
+        module = load_generator_module()
+        repo_root = Path(__file__).resolve().parents[1]
+        runner = module.CodexPersonaJobRunner(repo_root, repo_root)
+        runner._jobs["job_timeout"] = module.JobState("job_timeout")
+
+        timeout_error = RuntimeError("Codex 调用超时，当前账户已触发限流。")
+
+        with mock.patch.object(module, "run_codex_command", side_effect=timeout_error):
+            runner._run_job(
+                "job_timeout",
+                {
+                    "agents": ["codex"],
+                    "path_mappings": [],
+                    "links": [],
+                    "output_dir": str(repo_root / "PersonaVault"),
+                    "advanced_settings": {
+                        "target_scene": "job_jd",
+                        "job_jd_text": "",
+                        "focus_presets": [],
+                        "focus_custom": "",
+                        "redaction_profile": "conservative",
+                        "redaction_custom_rules": "",
+                    },
+                },
+            )
+
+        job = runner.get_job("job_timeout")
+        self.assertEqual(job["status"], "failed")
+        self.assertEqual(job["stage"], "failed")
+        self.assertIn("Codex 调用超时", job["message"])
+
+    def test_resolve_codex_runtime_config_uses_defaults_and_sanitizes_reasoning(self):
+        module = load_generator_module()
+
+        with mock.patch.dict(
+            module.os.environ,
+            {
+                "PERSONA_VAULT_CODEX_MODEL": "custom-demo-model",
+                "PERSONA_VAULT_CODEX_REASONING_EFFORT": "invalid",
+            },
+            clear=False,
+        ):
+            config = module.resolve_codex_runtime_config()
+
+        self.assertEqual(config["model"], "custom-demo-model")
+        self.assertEqual(config["reasoning_effort"], "low")
+
     def _create_demo_vault(self) -> Path:
         vault_dir = Path(tempfile.mkdtemp(prefix="persona-vault-deploy-"))
         (vault_dir / "00 - Profile").mkdir(parents=True)
@@ -242,12 +316,28 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
 
         command = module.build_codex_command(Path("/tmp/last-message.txt"))
 
-        self.assertEqual(command[:4], ["codex", "exec", "--model", "gpt-5.4"])
+        self.assertEqual(command[:4], ["codex", "exec", "--model", "gpt-5.4-mini"])
         self.assertIn('-c', command)
-        self.assertIn('model_reasoning_effort="medium"', command)
+        self.assertIn('model_reasoning_effort="low"', command)
         self.assertIn("--skip-git-repo-check", command)
         self.assertIn("--json", command)
         self.assertIn("-", command)
+
+    def test_build_codex_command_honors_env_override(self):
+        module = load_generator_module()
+
+        with mock.patch.dict(
+            module.os.environ,
+            {
+                "PERSONA_VAULT_CODEX_MODEL": "gpt-5.4",
+                "PERSONA_VAULT_CODEX_REASONING_EFFORT": "medium",
+            },
+            clear=False,
+        ):
+            command = module.build_codex_command(Path("/tmp/last-message.txt"))
+
+        self.assertEqual(command[:4], ["codex", "exec", "--model", "gpt-5.4"])
+        self.assertIn('model_reasoning_effort="medium"', command)
 
     def test_build_persona_site_command_uses_external_renderer_skill(self):
         module = load_generator_module()
@@ -701,6 +791,35 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
             try:
                 html = urllib.request.urlopen(f"{base_url}/generated/job_test").read().decode("utf-8")
                 self.assertIn("Persona Site", html)
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+                thread.join(timeout=2)
+
+    def test_index_endpoint_renders_effective_codex_runtime_config(self):
+        module = load_generator_module()
+        repo_root = Path(__file__).resolve().parents[1]
+        runner = FakeRunner()
+        opener = FakeOpener()
+
+        with mock.patch.dict(
+            module.os.environ,
+            {
+                "PERSONA_VAULT_CODEX_MODEL": "demo-model-fast",
+                "PERSONA_VAULT_CODEX_REASONING_EFFORT": "medium",
+            },
+            clear=False,
+        ):
+            httpd = module.create_server("127.0.0.1", 0, repo_root, runner, opener, opener, repo_root)
+            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+            thread.start()
+            base_url = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+            try:
+                html = urllib.request.urlopen(base_url).read().decode("utf-8")
+                self.assertIn("demo-model-fast", html)
+                self.assertIn("reasoning: medium", html)
+                self.assertNotIn("gpt-5.4</span>", html)
             finally:
                 httpd.shutdown()
                 httpd.server_close()

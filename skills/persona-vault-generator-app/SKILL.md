@@ -29,7 +29,8 @@ python3 skills/persona-vault-generator-app/scripts/run_persona_vault_generator_a
 ## 固定行为
 
 - 页面使用 Tailwind CSS CDN
-- 后端固定通过本机 `codex exec --model gpt-5.4 -c model_reasoning_effort="medium"` 执行任务
+- 后端默认通过本机 `codex exec --model gpt-5.4-mini -c model_reasoning_effort="low"` 执行任务
+- 可通过环境变量覆盖 `PERSONA_VAULT_CODEX_MODEL` 与 `PERSONA_VAULT_CODEX_REASONING_EFFORT`
 - `advanced_settings` 需要进入生成 payload，并写入第一阶段产物中的结构化配置
 - `github` 类型链接会优先抓取公开主页与代表仓库摘要，并作为授权外部来源并入 prompt、来源映射和网页预览
 - `linkedin`、`website` 暂时仍只记录为来源，不抓取正文
