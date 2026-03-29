@@ -21,14 +21,16 @@ PORT="${PERSONA_VAULT_PORT:-8765}"
 WORKDIR="${PERSONA_VAULT_WORKDIR:-$REPO_ROOT}"
 OPEN_BROWSER="${PERSONA_VAULT_OPEN_BROWSER:-0}"
 
-EXTRA_ARGS=()
+COMMAND=(
+  "$REPO_ROOT/.venv/bin/python"
+  "$REPO_ROOT/skills/persona-vault-generator-app/scripts/run_persona_vault_generator_app.py"
+  --host "$HOST"
+  --port "$PORT"
+  --working-directory "$WORKDIR"
+)
+
 if [ "$OPEN_BROWSER" = "1" ]; then
-  EXTRA_ARGS+=(--open-browser)
+  COMMAND+=(--open-browser)
 fi
 
-"$REPO_ROOT/.venv/bin/python" \
-  "$REPO_ROOT/skills/persona-vault-generator-app/scripts/run_persona_vault_generator_app.py" \
-  --host "$HOST" \
-  --port "$PORT" \
-  --working-directory "$WORKDIR" \
-  "${EXTRA_ARGS[@]}"
+"${COMMAND[@]}"

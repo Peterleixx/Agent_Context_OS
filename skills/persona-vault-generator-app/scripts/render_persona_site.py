@@ -50,6 +50,14 @@ def dedupe_strings(items: list[str]) -> list[str]:
     return ordered
 
 
+def coerce_string_list(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [item for item in [value.strip()] if item]
+    if isinstance(value, list):
+        return [item for item in [str(entry).strip() for entry in value] if item]
+    return []
+
+
 def default_generation_context() -> dict[str, object]:
     return {
         "target_scene": "job_jd",
@@ -278,10 +286,11 @@ def render_value_cards(cards: list[dict[str, str]]) -> str:
 
     parts: list[str] = []
     for card in cards:
+        description = clean_inline(str(card.get("description") or card.get("summary") or ""))
         parts.append(
             '<article class="rounded-3xl border border-stone-200 bg-stone-50 p-5">'
-            f'<h3 class="text-base font-semibold text-stone-900">{card["title"]}</h3>'
-            f'<p class="mt-3 text-sm leading-7 text-stone-600">{card["description"] or " "}</p>'
+            f'<h3 class="text-base font-semibold text-stone-900">{clean_inline(str(card.get("title", "")))}</h3>'
+            f'<p class="mt-3 text-sm leading-7 text-stone-600">{description or " "}</p>'
             "</article>"
         )
     return "".join(parts)
@@ -642,8 +651,13 @@ def render_project_capability_matrix(
     )
     body_rows: list[str] = []
     for project in project_cards:
+        project_title = str(project.get("title") or project.get("project") or "").strip()
+        project_capabilities = {
+            item
+            for item in [str(entry).strip() for entry in project.get("capabilities", [])]
+            if item
+        }
         cells = []
-        project_capabilities = set(project["capabilities"])
         for capability_title in capability_titles:
             covered = capability_title in project_capabilities
             tone = "bg-stone-900 text-white" if covered else "bg-stone-200 text-stone-400"
@@ -653,7 +667,7 @@ def render_project_capability_matrix(
             )
         body_rows.append(
             "<tr>"
-            f'<td class="whitespace-nowrap px-4 py-3 text-sm font-medium text-stone-900">{normalize_project_label(project["title"])}</td>'
+            f'<td class="whitespace-nowrap px-4 py-3 text-sm font-medium text-stone-900">{normalize_project_label(project_title)}</td>'
             + "".join(cells)
             + "</tr>"
         )
@@ -968,11 +982,16 @@ def build_site_payload(persona_vault_path: Path, site_title: str | None) -> dict
         "PAGE_TITLE": page_title,
         "GENERATED_AT": html.escape(datetime.now().strftime("%Y-%m-%d %H:%M")),
         "OBSIDIAN_HOME_URL": html.escape(obsidian_home_url),
-        "HERO_POINTS": render_list(list(render_profile.get("public_summary", [])), tone="dark"),
+        "HERO_POINTS": render_list(
+            coerce_string_list(render_profile.get("public_summary", [])),
+            tone="dark",
+        ),
         "PROFILE_FACETS": render_profile_facets(list(render_profile.get("profile_facets", []))),
-        "KEYWORD_CHIPS": render_keyword_chips(list(render_profile.get("keyword_chips", []))),
-        "CURRENT_FOCUS": render_list(list(render_profile.get("focus_items", []))),
-        "WORK_STYLE": render_list(list(render_profile.get("work_style_items", []))),
+        "KEYWORD_CHIPS": render_keyword_chips(
+            coerce_string_list(render_profile.get("keyword_chips", []))
+        ),
+        "CURRENT_FOCUS": render_list(coerce_string_list(render_profile.get("focus_items", []))),
+        "WORK_STYLE": render_list(coerce_string_list(render_profile.get("work_style_items", []))),
         "EXTERNAL_SOURCE_CARDS": render_external_source_cards(
             list(render_profile.get("external_source_cards", []))
         ),

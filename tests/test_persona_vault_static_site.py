@@ -371,6 +371,77 @@ class PersonaVaultStaticSiteTest(unittest.TestCase):
         self.assertIn("OpenAI 公开主页与代表仓库摘要", html)
         self.assertNotIn("No capability radar available.", html)
 
+    def test_renderer_accepts_value_cards_with_summary_only(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        output_dir = Path(tempfile.mkdtemp(prefix="persona-site-summary-"))
+        vault_dir = Path(tempfile.mkdtemp(prefix="persona-vault-summary-"))
+        script_path = (
+            repo_root
+            / "skills"
+            / "persona-vault-generator-app"
+            / "scripts"
+            / "render_persona_site.py"
+        )
+
+        (vault_dir / "00 - Profile").mkdir(parents=True)
+        (vault_dir / "01 - Capabilities").mkdir(parents=True)
+        (vault_dir / "02 - Projects").mkdir(parents=True)
+        (vault_dir / ".persona-system").mkdir(parents=True)
+        (vault_dir / "Home.md").write_text("# Home\n", encoding="utf-8")
+        (vault_dir / "00 - Profile" / "主要人物画像.md").write_text("# 主要人物画像\n", encoding="utf-8")
+        (vault_dir / ".persona-system" / "render-profile.json").write_text(
+            json.dumps(
+                {
+                    "generation_context": {"target_scene": "job_jd"},
+                    "profile_facets": [],
+                    "keyword_chips": [],
+                    "focus_items": [],
+                    "work_style_items": [],
+                    "value_cards": [
+                        {"title": "证据优先", "summary": "先验证，再表述。"}
+                    ],
+                    "capability_metrics": [
+                        {
+                            "title": "能力-Agent交付封装",
+                            "short_title": "Agent交付封装",
+                            "icon": "wrench",
+                            "judgment": "已形成稳定能力",
+                            "confidence": "高",
+                            "score": 90,
+                        }
+                    ],
+                    "project_capability_matrix": [
+                        {
+                            "project": "项目-Context OS Demo",
+                            "capabilities": ["能力-Agent交付封装"],
+                        }
+                    ],
+                    "public_summary": "擅长把复杂工作流转成可交付资产。",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(script_path),
+                "--persona-vault-path",
+                str(vault_dir),
+                "--output-dir",
+                str(output_dir),
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        html = (output_dir / "index.html").read_text(encoding="utf-8")
+        self.assertIn("证据优先", html)
+        self.assertIn("先验证，再表述。", html)
+        self.assertIn("Context OS Demo", html)
+
 
 if __name__ == "__main__":
     unittest.main()

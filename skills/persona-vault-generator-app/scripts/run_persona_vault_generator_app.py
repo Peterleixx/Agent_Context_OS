@@ -21,6 +21,7 @@ from urllib.request import Request, urlopen
 
 DEFAULT_JOB_MESSAGE = "正在调用本机 Codex 执行 PersonaVault 生成任务"
 DEFAULT_EDIT_MESSAGE = "正在应用自然语言修改并同步 PersonaVault 与网页预览。"
+GITHUB_FETCH_TIMEOUT_SECONDS = 8.0
 FOCUS_PRESET_LABELS = [
     "能力亮点",
     "代表项目",
@@ -111,7 +112,11 @@ def extract_github_owner(url: str) -> str | None:
     return owner or None
 
 
-def fetch_json_from_url(url: str) -> Any:
+def fetch_json_from_url(
+    url: str,
+    opener: Any = urlopen,
+    timeout: float = GITHUB_FETCH_TIMEOUT_SECONDS,
+) -> Any:
     request = Request(
         url,
         headers={
@@ -119,7 +124,7 @@ def fetch_json_from_url(url: str) -> Any:
             "User-Agent": "PersonaVaultGeneratorApp/1.0",
         },
     )
-    with urlopen(request) as response:  # noqa: S310
+    with opener(request, timeout=timeout) as response:  # noqa: S310
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -332,9 +337,11 @@ def resolve_output_paths(payload: dict[str, Any], working_directory: Path) -> tu
 
 def load_renderer_module(repo_root: Path) -> Any:
     script_path = resolve_renderer_script_path(repo_root)
-    spec = importlib.util.spec_from_file_location("persona_vault_renderer_runtime", script_path)
+    module_name = "persona_vault_renderer_runtime"
+    spec = importlib.util.spec_from_file_location(module_name, script_path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -453,7 +460,10 @@ class CodexPersonaJobRunner:
             renderer_module.load_render_profile_if_exists(vault_path),
             fallback_profile,
         )
-        render_profile["external_source_cards"] = self._build_external_source_cards(github_public_data)
+        if github_public_data:
+            render_profile["external_source_cards"] = self._build_external_source_cards(
+                github_public_data
+            )
         self._ensure_profile_support_files(vault_path, render_profile)
         self._ensure_capability_map_table(vault_path, render_profile)
         self._write_github_source_map(vault_path, github_public_data)
