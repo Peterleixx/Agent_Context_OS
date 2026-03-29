@@ -14,7 +14,7 @@ description: Use when a local browser-based UI is needed to collect PersonaVault
 
 ## 核心目标
 
-提供一个本地浏览器界面，把输入整理成结构化请求，再交给本机 `codex exec` 执行完整 `PersonaVault` 生成任务，并串联静态站导出。
+提供一个本地浏览器界面，把输入整理成结构化请求，再交给本机 `codex exec` 执行完整 `PersonaVault` 生成任务，并在同一流程中直接导出网页预览。
 
 页面应支持高级设置，尤其是 `岗位/JD` 场景下的 `focus`、`岗位要求` 和 `脱敏原则`。
 
@@ -32,7 +32,8 @@ python3 skills/persona-vault-generator-app/scripts/run_persona_vault_generator_a
 - 后端固定通过本机 `codex exec --model gpt-5.4 -c model_reasoning_effort="medium"` 执行任务
 - `advanced_settings` 需要进入生成 payload，并写入第一阶段产物中的结构化配置
 - 外部链接默认只记录为来源，不抓取正文
-- 生成完成后自动调用 `persona-vault-static-site` 导出网页预览
+- 生成完成后自动导出网页预览，不依赖单独的网页 skill
 - 第一阶段需要补齐 `.persona-system/render-profile.json` 和前端友好的画像结构
 - 前端成功态保留在第一页，只提供“打开网页预览”入口，不自动跳转
+- 前端成功态支持“自然语言修改 / 重写”，并要求同时刷新 PersonaVault Markdown、结构化画像数据和网页预览
 - 页面内仍保留一键调用本机 `Obsidian`

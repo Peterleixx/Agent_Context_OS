@@ -27,6 +27,7 @@ def load_generator_module():
 class FakeRunner:
     def __init__(self):
         self.last_payload = None
+        self.last_edit = None
         self.job = {
             "job_id": "job_test",
             "status": "running",
@@ -38,7 +39,18 @@ class FakeRunner:
         self.last_payload = payload
         return self.job["job_id"]
 
+    def start_edit_job(self, job_id, instruction):
+        self.last_edit = {"job_id": job_id, "instruction": instruction}
+        return "job_edit"
+
     def get_job(self, job_id):
+        if job_id == "job_edit":
+            return {
+                "job_id": "job_edit",
+                "status": "running",
+                "stage": "running_codex",
+                "message": "正在应用自然语言修改。",
+            }
         if job_id != self.job["job_id"]:
             return None
         return self.job
@@ -77,7 +89,7 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
     def test_build_persona_site_command_uses_external_renderer_skill(self):
         module = load_generator_module()
         repo_root = Path(__file__).resolve().parents[1]
-        renderer_path = module.resolve_static_site_renderer_path(repo_root)
+        renderer_path = module.resolve_renderer_script_path(repo_root)
 
         command = module.build_persona_site_command(
             renderer_path,
@@ -90,7 +102,7 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
         self.assertEqual(command[1], str(renderer_path))
         self.assertEqual(
             renderer_path,
-            repo_root / "skills" / "persona-vault-static-site" / "scripts" / "render_persona_site.py",
+            repo_root / "skills" / "persona-vault-generator-app" / "scripts" / "render_persona_site.py",
         )
         self.assertIn("--persona-vault-path", command)
         self.assertIn("/tmp/PersonaVault", command)
@@ -165,6 +177,21 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
         self.assertIn('"target_scene": "job_jd"', prompt)
         self.assertIn("岗位/JD", prompt)
 
+    def test_build_edit_prompt_mentions_vault_and_render_profile_sync(self):
+        module = load_generator_module()
+        repo_root = Path(__file__).resolve().parents[1]
+
+        prompt = module.build_edit_prompt(
+            repo_root,
+            Path("/tmp/PersonaVault"),
+            "把人物画像改得更适合 AI Agent 岗位，强调代表项目，删掉过于投资化表述。",
+        )
+
+        self.assertIn("/tmp/PersonaVault", prompt)
+        self.assertIn(".persona-system/render-profile.json", prompt)
+        self.assertIn("同时修改", prompt)
+        self.assertIn("自然语言修改", prompt)
+
     def test_parse_codex_output_skips_non_json_lines(self):
         module = load_generator_module()
 
@@ -201,6 +228,7 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
             self.assertIn("岗位/JD", html)
             self.assertIn("job_jd_text", html)
             self.assertIn("redaction_custom_rules", html)
+            self.assertIn("自然语言修改 / 重写", html)
 
             payload = {
                 "agents": ["codex"],
@@ -232,6 +260,24 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
                 urllib.request.urlopen(f"{base_url}/api/jobs/job_test").read().decode("utf-8")
             )
             self.assertEqual(job["stage"], "running_codex")
+
+            edit_request = urllib.request.Request(
+                f"{base_url}/api/edit",
+                data=json.dumps(
+                    {
+                        "job_id": "job_test",
+                        "instruction": "强化代表项目，弱化投资内容",
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            edit_response = json.loads(
+                urllib.request.urlopen(edit_request).read().decode("utf-8")
+            )
+            self.assertEqual(edit_response["job_id"], "job_edit")
+            self.assertEqual(runner.last_edit["job_id"], "job_test")
+            self.assertEqual(runner.last_edit["instruction"], "强化代表项目，弱化投资内容")
 
             open_request = urllib.request.Request(
                 f"{base_url}/api/open-obsidian",
@@ -292,6 +338,8 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
         html = template_path.read_text(encoding="utf-8")
 
         self.assertIn("打开网页预览", html)
+        self.assertIn("自然语言修改 / 重写", html)
+        self.assertIn("/api/edit", html)
         self.assertNotIn("即将跳转到网页预览", html)
         self.assertNotIn("pendingRedirect = setTimeout", html)
 

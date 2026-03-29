@@ -3,7 +3,6 @@
 这是一个可直接 clone 到任意目录、本地两行命令启动的 PersonaVault 工具仓库。仓库已经内置：
 
 - `build-persona-vault`
-- `persona-vault-static-site`
 - `persona-vault-generator-app`
 - 对应测试、启动脚本和环境配置示例
 
@@ -51,16 +50,12 @@ cp .env.example .env.local
   - 现在要求在构建人物画像时，必须把“用户与 Agent 的聊天记录”作为重要参考来源之一纳入证据链
 - `compile-match-response`
   - 读取单个 Markdown 任务请求，并输出一份保守、可追溯、证据驱动的 Markdown 匹配结果
-- `persona-vault-static-site`
-  - 把本地 `PersonaVault` 导出成一个单文件 `index.html`
-  - 页面使用 Tailwind CSS CDN，浏览器可直接打开
-  - 只展示核心画像，不直接展开证据正文
 - `persona-vault-generator-app`
   - 启动一个本地交互式服务
   - 通过浏览器收集 agent、多路径映射、外部链接和输出目录
   - 由本机 `codex exec --model gpt-5.4` 执行完整 PersonaVault 生成
-  - 生成后自动调用静态站导出，并跳转到网页预览
-  - 静态站导出使用仓库内置的 `persona-vault-static-site` skill，不依赖本机固定绝对路径
+  - 生成完成后会在同一流程里直接导出网页预览链接
+  - 成功态保留在首页，支持打开网页、打开 Obsidian，以及自然语言修改 / 重写
 
 ## 仓库结构
 
@@ -72,10 +67,6 @@ skills/
     templates/
   compile-match-response/
     SKILL.md
-    templates/
-  persona-vault-static-site/
-    SKILL.md
-    scripts/
     templates/
   persona-vault-generator-app/
     SKILL.md
@@ -89,7 +80,7 @@ skills/
 - 单文件请求 / 单文件输出
 - 保守的、证据驱动的岗位或任务匹配
 - 适合在 `Obsidian` 中直接阅读和维护的知识组织方式
-- 轻量的本地人物画像网页导出
+- 轻量的本地人物画像网页导出与自然语言改写
 
 ## 当前约束重点
 

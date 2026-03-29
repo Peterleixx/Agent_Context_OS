@@ -30,7 +30,7 @@ FOCUS_PRESET_LABELS = [
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Render a PersonaVault into a static profile page."
+        description="Render a PersonaVault into the integrated generator preview page."
     )
     parser.add_argument("--persona-vault-path", required=True)
     parser.add_argument("--output-dir", required=True)
@@ -964,7 +964,7 @@ def main() -> int:
     if not persona_vault_path.is_dir():
         raise SystemExit(f"PersonaVault path does not exist: {persona_vault_path}")
 
-    template_path = Path(__file__).resolve().parents[1] / "templates" / "index.template.html"
+    template_path = Path(__file__).resolve().parents[1] / "templates" / "persona-site.template.html"
     template = template_path.read_text(encoding="utf-8")
     payload = build_site_payload(persona_vault_path, args.site_title)
     rendered_html = render_template(template, payload)

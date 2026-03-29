@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 
 
 DEFAULT_JOB_MESSAGE = "正在调用本机 Codex 执行 PersonaVault 生成任务"
+DEFAULT_EDIT_MESSAGE = "正在应用自然语言修改并同步 PersonaVault 与网页预览。"
 FOCUS_PRESET_LABELS = [
     "能力亮点",
     "代表项目",
@@ -114,8 +115,8 @@ def build_codex_command(output_last_message_path: Path) -> list[str]:
     ]
 
 
-def resolve_static_site_renderer_path(repo_root: Path) -> Path:
-    return repo_root / "skills" / "persona-vault-static-site" / "scripts" / "render_persona_site.py"
+def resolve_renderer_script_path(repo_root: Path) -> Path:
+    return repo_root / "skills" / "persona-vault-generator-app" / "scripts" / "render_persona_site.py"
 
 
 def resolve_site_output_paths(vault_path: Path) -> tuple[Path, Path]:
@@ -137,6 +138,32 @@ def build_persona_site_command(
         "--site-title",
         site_title,
     ]
+
+
+def build_edit_prompt(repo_root: Path, vault_path: Path, instruction: str) -> str:
+    skill_path = repo_root / "skills" / "build-persona-vault" / "SKILL.md"
+    structure_path = (
+        repo_root / "skills" / "build-persona-vault" / "references" / "persona-vault-structure.md"
+    )
+    render_profile_path = vault_path / ".persona-system" / "render-profile.json"
+    return (
+        "Read the repository-local PersonaVault skill and use it as the guardrail for this edit.\n\n"
+        f"Skill path: {skill_path}\n"
+        f"Structure reference: {structure_path}\n\n"
+        "Task:\n"
+        "- Apply a natural-language edit to the existing PersonaVault.\n"
+        f"- PersonaVault root: {vault_path}\n"
+        f"- Structured render profile path: {render_profile_path}\n"
+        "- You MUST 同时修改 human-readable Markdown cards and `.persona-system/render-profile.json`.\n"
+        "- Treat this as a 自然语言修改 / 重写 request against an existing vault, not a fresh rebuild.\n"
+        "- Keep `00 - Profile/主要人物画像.md` as the primary profile entry.\n"
+        "- Keep `01 - Capabilities/能力地图.md` consistent with render-profile data, especially the `核心能力总览` table.\n"
+        "- Preserve the advanced settings context and conservative redaction style unless the instruction explicitly changes emphasis.\n"
+        "- Do not delete the vault or unrelated notes. Update only the files needed to satisfy the edit request.\n"
+        "- Do not render the website yourself; the local app will regenerate the preview after your edits.\n\n"
+        "Natural-language instruction:\n"
+        f"{instruction.strip()}\n"
+    )
 
 
 def normalize_payload(payload: dict[str, Any], working_directory: Path) -> dict[str, Any]:
@@ -199,9 +226,9 @@ def resolve_output_paths(payload: dict[str, Any], working_directory: Path) -> tu
     return vault_path, profile_path
 
 
-def load_static_site_module(repo_root: Path) -> Any:
-    script_path = resolve_static_site_renderer_path(repo_root)
-    spec = importlib.util.spec_from_file_location("persona_vault_static_site_runtime", script_path)
+def load_renderer_module(repo_root: Path) -> Any:
+    script_path = resolve_renderer_script_path(repo_root)
+    spec = importlib.util.spec_from_file_location("persona_vault_renderer_runtime", script_path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -275,6 +302,29 @@ class CodexPersonaJobRunner:
         thread.start()
         return job_id
 
+    def start_edit_job(self, job_id: str, instruction: str) -> str:
+        source_job = self.get_job(job_id)
+        if source_job is None:
+            raise ValueError("job not found")
+        vault_path = str(source_job.get("vault_path", "")).strip()
+        if not vault_path:
+            raise ValueError("job has no generated PersonaVault")
+        edit_job_id = f"job_{uuid.uuid4().hex[:10]}"
+        state = JobState(job_id=edit_job_id)
+        state.vault_path = vault_path
+        state.profile_path = str(source_job.get("profile_path", "")).strip() or None
+        state.site_path = str(source_job.get("site_path", "")).strip() or None
+        state.site_url = str(source_job.get("site_url", "")).strip() or None
+        with self._lock:
+            self._jobs[edit_job_id] = state
+        thread = threading.Thread(
+            target=self._run_edit_job,
+            args=(edit_job_id, Path(vault_path), instruction),
+            daemon=True,
+        )
+        thread.start()
+        return edit_job_id
+
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
             state = self._jobs.get(job_id)
@@ -287,16 +337,80 @@ class CodexPersonaJobRunner:
                 setattr(state, key, value)
 
     def _enhance_persona_vault(self, vault_path: Path, payload: dict[str, Any]) -> dict[str, Any]:
-        static_site_module = load_static_site_module(self.repo_root)
+        renderer_module = load_renderer_module(self.repo_root)
         advanced_settings = normalize_payload(payload, self.working_directory)["advanced_settings"]
-        render_profile = static_site_module.build_render_profile_from_markdown(
+        fallback_profile = renderer_module.build_render_profile_from_markdown(
             vault_path,
             advanced_settings,
+        )
+        render_profile = renderer_module.merge_render_profile(
+            renderer_module.load_render_profile_if_exists(vault_path),
+            fallback_profile,
         )
         self._ensure_profile_support_files(vault_path, render_profile)
         self._ensure_capability_map_table(vault_path, render_profile)
         self._write_render_profile_json(vault_path, render_profile)
         return render_profile
+
+    def _refresh_persona_outputs(
+        self,
+        job_id: str,
+        vault_path: Path,
+        profile_path: Path,
+        payload: dict[str, Any] | None = None,
+    ) -> bool:
+        self._update_job(job_id, stage="writing_vault", message="正在补齐结构化画像数据。")
+        try:
+            if payload is None:
+                payload = {
+                    "agents": [],
+                    "path_mappings": [],
+                    "links": [],
+                    "output_dir": str(vault_path),
+                    "advanced_settings": (
+                        load_renderer_module(self.repo_root)
+                        .load_render_profile_if_exists(vault_path)
+                        or {}
+                    ).get("generation_context", {}),
+                }
+            self._enhance_persona_vault(vault_path, payload)
+        except Exception as exc:  # pragma: no cover - defensive runtime guard
+            self._update_job(
+                job_id,
+                status="failed",
+                stage="failed",
+                message=f"补齐结构化画像数据失败: {exc}",
+                vault_path=str(vault_path),
+                profile_path=str(profile_path),
+            )
+            return False
+
+        self._update_job(job_id, stage="writing_vault", message="正在导出静态网页。")
+        site_dir, site_path = resolve_site_output_paths(vault_path)
+        site_result = self._render_persona_site(vault_path, site_dir)
+        if not site_result["ok"]:
+            self._update_job(
+                job_id,
+                status="failed",
+                stage="failed",
+                message=site_result["message"],
+                vault_path=str(vault_path),
+                profile_path=str(profile_path),
+            )
+            return False
+
+        self._update_job(
+            job_id,
+            status="completed",
+            stage="completed",
+            message=site_result.get("message", "PersonaVault 已生成完成。"),
+            vault_path=str(vault_path),
+            profile_path=str(profile_path),
+            site_path=str(site_path),
+            site_url=f"/generated/{job_id}",
+            can_open_obsidian=Path("/Applications/Obsidian.app").exists(),
+        )
+        return True
 
     def _ensure_profile_support_files(self, vault_path: Path, render_profile: dict[str, Any]) -> None:
         profile_dir = vault_path / "00 - Profile"
@@ -419,44 +533,9 @@ class CodexPersonaJobRunner:
             if last_message_path.exists():
                 final_message = last_message_path.read_text(encoding="utf-8").strip()
             if return_code == 0 and vault_path.exists():
-                self._update_job(job_id, stage="writing_vault", message="正在补齐结构化画像数据。")
-                try:
-                    self._enhance_persona_vault(vault_path, payload)
-                except Exception as exc:  # pragma: no cover - defensive runtime guard
-                    self._update_job(
-                        job_id,
-                        status="failed",
-                        stage="failed",
-                        message=f"补齐结构化画像数据失败: {exc}",
-                        vault_path=str(vault_path),
-                        profile_path=str(profile_path),
-                    )
-                    return
-                self._update_job(job_id, stage="writing_vault", message="正在导出静态网页。")
-                site_dir, site_path = resolve_site_output_paths(vault_path)
-                site_result = self._render_persona_site(vault_path, site_dir)
-                if not site_result["ok"]:
-                    self._update_job(
-                        job_id,
-                        status="failed",
-                        stage="failed",
-                        message=site_result["message"],
-                        vault_path=str(vault_path),
-                        profile_path=str(profile_path),
-                    )
-                    return
-
-                self._update_job(
-                    job_id,
-                    status="completed",
-                    stage="completed",
-                    message=final_message or "PersonaVault 已生成完成。",
-                    vault_path=str(vault_path),
-                    profile_path=str(profile_path),
-                    site_path=str(site_path),
-                    site_url=f"/generated/{job_id}",
-                    can_open_obsidian=Path("/Applications/Obsidian.app").exists(),
-                )
+                self._refresh_persona_outputs(job_id, vault_path, profile_path, payload)
+                if final_message and self.get_job(job_id) and self.get_job(job_id)["status"] == "completed":
+                    self._update_job(job_id, message=final_message)
                 return
 
             error_message = final_message or "\n".join(output_lines[-10:]).strip() or "Codex generation failed."
@@ -468,7 +547,7 @@ class CodexPersonaJobRunner:
             )
 
     def _render_persona_site(self, vault_path: Path, site_dir: Path) -> dict[str, Any]:
-        renderer_script_path = resolve_static_site_renderer_path(self.repo_root)
+        renderer_script_path = resolve_renderer_script_path(self.repo_root)
         if not renderer_script_path.exists():
             return {
                 "ok": False,
@@ -492,7 +571,54 @@ class CodexPersonaJobRunner:
         if result.returncode != 0 or not site_path.exists():
             message = result.stderr.strip() or result.stdout.strip() or "静态网页导出失败。"
             return {"ok": False, "message": message}
-        return {"ok": True, "site_path": str(site_path)}
+        return {"ok": True, "site_path": str(site_path), "message": "PersonaVault 与网页预览已同步完成。"}
+
+    def _run_edit_job(self, job_id: str, vault_path: Path, instruction: str) -> None:
+        self._update_job(job_id, stage="preparing_prompt", message="正在整理自然语言修改指令。")
+        prompt = build_edit_prompt(self.repo_root, vault_path, instruction)
+        with tempfile.TemporaryDirectory(prefix="persona-vault-edit-") as tmp_dir:
+            last_message_path = Path(tmp_dir) / "last-message.txt"
+            command = build_codex_command(last_message_path)
+
+            self._update_job(job_id, stage="running_codex", message=DEFAULT_EDIT_MESSAGE)
+            process = subprocess.Popen(
+                command,
+                cwd=str(vault_path),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            assert process.stdin is not None
+            assert process.stdout is not None
+            process.stdin.write(prompt)
+            process.stdin.close()
+
+            output_lines: list[str] = []
+            for line in process.stdout:
+                output_lines.append(line.rstrip("\n"))
+            return_code = process.wait()
+
+            profile_path = vault_path / "00 - Profile" / "主要人物画像.md"
+            final_message = ""
+            if last_message_path.exists():
+                final_message = last_message_path.read_text(encoding="utf-8").strip()
+
+            if return_code == 0 and vault_path.exists():
+                refreshed = self._refresh_persona_outputs(job_id, vault_path, profile_path, None)
+                if refreshed and final_message:
+                    self._update_job(job_id, message=final_message)
+                return
+
+            error_message = final_message or "\n".join(output_lines[-10:]).strip() or "Codex edit failed."
+            self._update_job(
+                job_id,
+                status="failed",
+                stage="failed",
+                message=error_message,
+                vault_path=str(vault_path),
+                profile_path=str(profile_path),
+            )
 
 
 class AppHandler(BaseHTTPRequestHandler):
@@ -537,6 +663,21 @@ class AppHandler(BaseHTTPRequestHandler):
             result = self.server.obsidian_opener(vault_path)
             status = HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST
             self._json_response(result, status)
+            return
+
+        if self.path == "/api/edit":
+            payload = self._read_json_body()
+            job_id = str(payload.get("job_id", "")).strip()
+            instruction = str(payload.get("instruction", "")).strip()
+            if not job_id or not instruction:
+                self._json_response({"message": "缺少 job_id 或 instruction。"}, HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                edit_job_id = self.server.runner.start_edit_job(job_id, instruction)
+            except ValueError as exc:
+                self._json_response({"message": str(exc)}, HTTPStatus.BAD_REQUEST)
+                return
+            self._json_response({"job_id": edit_job_id}, HTTPStatus.OK)
             return
 
         self._json_response({"message": "not found"}, HTTPStatus.NOT_FOUND)

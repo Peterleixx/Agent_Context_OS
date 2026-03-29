@@ -124,7 +124,7 @@ class PersonaVaultStaticSiteTest(unittest.TestCase):
         script_path = (
             repo_root
             / "skills"
-            / "persona-vault-static-site"
+            / "persona-vault-generator-app"
             / "scripts"
             / "render_persona_site.py"
         )
@@ -169,7 +169,7 @@ class PersonaVaultStaticSiteTest(unittest.TestCase):
         script_path = (
             repo_root
             / "skills"
-            / "persona-vault-static-site"
+            / "persona-vault-generator-app"
             / "scripts"
             / "render_persona_site.py"
         )
@@ -279,7 +279,7 @@ class PersonaVaultStaticSiteTest(unittest.TestCase):
         script_path = (
             repo_root
             / "skills"
-            / "persona-vault-static-site"
+            / "persona-vault-generator-app"
             / "scripts"
             / "render_persona_site.py"
         )
