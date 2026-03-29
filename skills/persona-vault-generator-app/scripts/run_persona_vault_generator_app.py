@@ -20,7 +20,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import Request, urlopen
 
 
@@ -39,6 +39,10 @@ FOCUS_PRESET_LABELS = [
     "业务结果",
     "协作风格",
 ]
+
+
+class AgentConflictError(ValueError):
+    pass
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -472,6 +476,13 @@ def slugify_agent_id(value: str) -> str:
     return raw or "persona-vault"
 
 
+def normalize_requested_agent_id(value: str) -> str | None:
+    raw = value.strip().lower()
+    raw = re.sub(r"[^a-z0-9]+", "-", raw)
+    raw = raw.strip("-")
+    return raw or None
+
+
 def derive_default_agent_slug(vault_name: str) -> str:
     raw = vault_name.strip().lower()
     while raw.count("-") >= 3:
@@ -526,6 +537,44 @@ def build_openclaw_gateway_start_command() -> list[str]:
 
 def build_openclaw_gateway_restart_command() -> list[str]:
     return ["openclaw", "gateway", "restart", "--json"]
+
+
+def build_openclaw_agents_list_command() -> list[str]:
+    return ["openclaw", "agents", "list", "--json"]
+
+
+def build_openclaw_agent_session_key(agent_id: str) -> str:
+    return f"agent:{agent_id}:main"
+
+
+def build_openclaw_chat_history_command(session_key: str, limit: int = 200) -> list[str]:
+    return [
+        "openclaw",
+        "gateway",
+        "call",
+        "chat.history",
+        "--json",
+        "--params",
+        json.dumps({"sessionKey": session_key, "limit": limit}, ensure_ascii=False),
+    ]
+
+
+def build_openclaw_agent_chat_command(agent_id: str, message: str) -> list[str]:
+    return [
+        "openclaw",
+        "agent",
+        "--agent",
+        agent_id,
+        "--session-id",
+        "main",
+        "--message",
+        message,
+        "--json",
+    ]
+
+
+def build_openclaw_chat_url(agent_id: str) -> str:
+    return f"/chat?agent_id={quote(agent_id)}"
 
 
 def build_openclaw_docs_url() -> str:
@@ -677,8 +726,11 @@ class JobState:
         self.site_url: str | None = None
         self.can_open_obsidian = False
         self.openclaw_agent_id: str | None = None
+        self.openclaw_requested_agent_id: str | None = None
+        self.openclaw_suggested_agent_id: str | None = None
         self.openclaw_workspace_path: str | None = None
         self.openclaw_docs_url: str | None = None
+        self.openclaw_chat_url: str | None = None
         self.request_payload: dict[str, Any] | None = None
         self.edit_instruction: str | None = None
         self.retry_mode: str | None = None
@@ -699,8 +751,11 @@ class JobState:
             "site_url": self.site_url,
             "can_open_obsidian": self.can_open_obsidian,
             "openclaw_agent_id": self.openclaw_agent_id,
+            "openclaw_requested_agent_id": self.openclaw_requested_agent_id,
+            "openclaw_suggested_agent_id": self.openclaw_suggested_agent_id,
             "openclaw_workspace_path": self.openclaw_workspace_path,
             "openclaw_docs_url": self.openclaw_docs_url,
+            "openclaw_chat_url": self.openclaw_chat_url,
             "retry_available": self.retry_available,
             "retry_label": self.retry_label,
         }
@@ -725,6 +780,59 @@ class CodexPersonaJobRunner:
     def _get_job_state(self, job_id: str) -> JobState | None:
         with self._lock:
             return self._jobs.get(job_id)
+
+    def _agent_id_exists(self, agent_id: str, home_dir: Path | None = None) -> bool:
+        home_dir = (home_dir or Path.home()).expanduser().resolve()
+        state_dir = home_dir / ".openclaw"
+        return (
+            (state_dir / f"workspace-{agent_id}").exists()
+            or (state_dir / "agents" / agent_id).exists()
+        )
+
+    def _load_openclaw_suggested_agent_id(self, vault_path: Path) -> str:
+        profile = self._load_openclaw_agent_profile(vault_path)
+        return str(profile.get("agent_slug", "")).strip() or derive_default_agent_slug(vault_path.name)
+
+    def _ensure_openclaw_available(self) -> None:
+        if shutil.which("openclaw") is None:
+            raise RuntimeError("未在 PATH 中找到 openclaw CLI。")
+
+    def _ensure_openclaw_gateway_ready(self) -> None:
+        self._ensure_openclaw_available()
+        health = subprocess.run(
+            build_openclaw_health_command(),
+            cwd=str(self.working_directory),
+            capture_output=True,
+            text=True,
+        )
+        if health.returncode == 0:
+            return
+        self._run_checked_command(build_openclaw_gateway_start_command(), self.working_directory)
+        retry_health = subprocess.run(
+            build_openclaw_health_command(),
+            cwd=str(self.working_directory),
+            capture_output=True,
+            text=True,
+        )
+        if retry_health.returncode != 0:
+            message = retry_health.stderr.strip() or retry_health.stdout.strip() or "gateway health failed"
+            raise RuntimeError(f"启动 gateway 后仍不可用: {message}")
+
+    def _list_openclaw_agents(self) -> list[dict[str, Any]]:
+        self._ensure_openclaw_available()
+        result = self._run_checked_command(build_openclaw_agents_list_command(), self.working_directory)
+        data = json.loads(result.stdout or "[]")
+        if not isinstance(data, list):
+            raise RuntimeError("OpenClaw agents list 返回格式无效。")
+        return [item for item in data if isinstance(item, dict)]
+
+    def _validate_chat_agent_id(self, agent_id: str) -> str:
+        normalized = normalize_requested_agent_id(agent_id)
+        if not normalized:
+            raise ValueError("缺少合法的 agent_id。")
+        if normalized not in {str(item.get("id", "")).strip() for item in self._list_openclaw_agents()}:
+            raise ValueError(f"OpenClaw agent 不存在: {normalized}")
+        return normalized
 
     def start_job(self, payload: dict[str, Any], source_job_id: str | None = None) -> str:
         job_id = f"job_{uuid.uuid4().hex[:10]}"
@@ -787,6 +895,7 @@ class CodexPersonaJobRunner:
         self,
         vault_path: Path,
         source_job_id: str | None = None,
+        agent_id: str | None = None,
     ) -> str:
         deploy_job_id = f"job_{uuid.uuid4().hex[:10]}"
         state = JobState(job_id=deploy_job_id)
@@ -794,6 +903,8 @@ class CodexPersonaJobRunner:
         state.source_job_id = source_job_id
         state.vault_path = str(vault_path)
         state.profile_path = str(vault_path / "00 - Profile" / "主要人物画像.md")
+        state.openclaw_requested_agent_id = agent_id
+        state.openclaw_suggested_agent_id = self._load_openclaw_suggested_agent_id(vault_path)
         state.retry_mode = "rerun_deploy"
         state.retry_available = True
         state.retry_label = "重试部署"
@@ -801,25 +912,33 @@ class CodexPersonaJobRunner:
             self._jobs[deploy_job_id] = state
         thread = threading.Thread(
             target=self._run_deploy_job,
-            args=(deploy_job_id, vault_path),
+            args=(deploy_job_id, vault_path, agent_id),
             daemon=True,
         )
         thread.start()
         return deploy_job_id
 
-    def start_deploy_job(self, job_id: str) -> str:
+    def start_deploy_job(self, job_id: str, agent_id: str | None = None) -> str:
         source_job = self.get_job(job_id)
         if source_job is None:
             raise ValueError("job not found")
         vault_path = str(source_job.get("vault_path", "")).strip()
         if not vault_path:
             raise ValueError("job has no generated PersonaVault")
-        deploy_job_id = self.start_deploy_job_from_vault(Path(vault_path), job_id)
+        normalized_agent_id = None
+        if agent_id is not None and agent_id.strip():
+            normalized_agent_id = normalize_requested_agent_id(agent_id)
+            if not normalized_agent_id:
+                raise ValueError("自定义 Agent ID 归一化后为空。")
+            if self._agent_id_exists(normalized_agent_id):
+                raise AgentConflictError(f"OpenClaw agentId 已存在: {normalized_agent_id}")
+        deploy_job_id = self.start_deploy_job_from_vault(Path(vault_path), job_id, normalized_agent_id)
         self._update_job(
             deploy_job_id,
             profile_path=str(source_job.get("profile_path", "")).strip() or None,
             site_path=str(source_job.get("site_path", "")).strip() or None,
             site_url=str(source_job.get("site_url", "")).strip() or None,
+            openclaw_suggested_agent_id=str(source_job.get("openclaw_suggested_agent_id", "")).strip() or None,
         )
         return deploy_job_id
 
@@ -880,7 +999,11 @@ class CodexPersonaJobRunner:
         if state.retry_mode == "rerun_deploy":
             if not state.vault_path:
                 raise ValueError("missing deploy context for retry")
-            return self.start_deploy_job_from_vault(Path(state.vault_path), job_id)
+            return self.start_deploy_job_from_vault(
+                Path(state.vault_path),
+                job_id,
+                state.openclaw_requested_agent_id,
+            )
 
         raise ValueError("unknown retry mode")
 
@@ -1024,6 +1147,7 @@ class CodexPersonaJobRunner:
                     ).get("generation_context", {}),
                 }
             self._enhance_persona_vault(vault_path, payload)
+            suggested_agent_id = self._load_openclaw_suggested_agent_id(vault_path)
         except Exception as exc:  # pragma: no cover - defensive runtime guard
             self._update_job(
                 job_id,
@@ -1063,6 +1187,7 @@ class CodexPersonaJobRunner:
             site_path=str(site_path),
             site_url=f"/generated/{job_id}",
             can_open_obsidian=Path("/Applications/Obsidian.app").exists(),
+            openclaw_suggested_agent_id=suggested_agent_id,
             retry_available=False,
             retry_label=None,
         )
@@ -1296,6 +1421,39 @@ class CodexPersonaJobRunner:
             raise RuntimeError(message)
         return result
 
+    def load_openclaw_chat_history(self, agent_id: str) -> dict[str, Any]:
+        normalized_agent_id = self._validate_chat_agent_id(agent_id)
+        self._ensure_openclaw_gateway_ready()
+        session_key = build_openclaw_agent_session_key(normalized_agent_id)
+        result = self._run_checked_command(
+            build_openclaw_chat_history_command(session_key),
+            self.working_directory,
+        )
+        payload = json.loads(result.stdout or "{}")
+        if not isinstance(payload, dict):
+            raise RuntimeError("OpenClaw chat.history 返回格式无效。")
+        payload["agent_id"] = normalized_agent_id
+        payload["sessionKey"] = str(payload.get("sessionKey", "")).strip() or session_key
+        return payload
+
+    def send_openclaw_chat_message(self, agent_id: str, message: str) -> dict[str, Any]:
+        normalized_agent_id = self._validate_chat_agent_id(agent_id)
+        text = message.strip()
+        if not text:
+            raise ValueError("message 不能为空。")
+        self._ensure_openclaw_gateway_ready()
+        result = self._run_checked_command(
+            build_openclaw_agent_chat_command(normalized_agent_id, text),
+            self.working_directory,
+        )
+        payload = json.loads(result.stdout or "{}")
+        if not isinstance(payload, dict):
+            raise RuntimeError("OpenClaw agent 返回格式无效。")
+        payload["ok"] = payload.get("status") == "ok"
+        payload["agent_id"] = normalized_agent_id
+        payload["sessionKey"] = build_openclaw_agent_session_key(normalized_agent_id)
+        return payload
+
     def _write_openclaw_workspace_files(
         self,
         workspace_path: Path,
@@ -1353,8 +1511,11 @@ class CodexPersonaJobRunner:
         for file_name, content in files.items():
             (workspace_path / file_name).write_text(content + "\n", encoding="utf-8")
 
-    def _run_deploy_job(self, job_id: str, vault_path: Path) -> None:
+    def _run_deploy_job(self, job_id: str, vault_path: Path, requested_agent_id: str | None = None) -> None:
         self._update_job(job_id, stage="deploy_preparing_profile", message="正在准备 OpenClaw 部署画像。")
+        state = self._get_job_state(job_id)
+        if requested_agent_id is None and state is not None:
+            requested_agent_id = state.openclaw_requested_agent_id
         try:
             agent_profile = self._load_openclaw_agent_profile(vault_path)
         except Exception as exc:
@@ -1373,6 +1534,20 @@ class CodexPersonaJobRunner:
 
         home_dir = Path.home().expanduser().resolve()
         state_dir = home_dir / ".openclaw"
+        normalized_requested_agent_id = None
+        if requested_agent_id:
+            normalized_requested_agent_id = normalize_requested_agent_id(requested_agent_id)
+            if not normalized_requested_agent_id:
+                self._update_job(job_id, status="failed", stage="failed", message="自定义 Agent ID 归一化后为空。")
+                return
+            if self._agent_id_exists(normalized_requested_agent_id, home_dir):
+                self._update_job(
+                    job_id,
+                    status="failed",
+                    stage="failed",
+                    message=f"OpenClaw agentId 已存在: {normalized_requested_agent_id}",
+                )
+                return
         config_path = state_dir / "openclaw.json"
         try:
             if not config_path.exists():
@@ -1381,7 +1556,10 @@ class CodexPersonaJobRunner:
             self._update_job(job_id, status="failed", stage="failed", message=f"初始化 OpenClaw 失败: {exc}")
             return
 
-        agent_id = resolve_unique_agent_id(str(agent_profile.get("agent_slug", "")), home_dir)
+        agent_id = normalized_requested_agent_id or resolve_unique_agent_id(
+            str(agent_profile.get("agent_slug", "")),
+            home_dir,
+        )
         workspace_path = state_dir / f"workspace-{agent_id}"
         self._update_job(
             job_id,
@@ -1426,8 +1604,11 @@ class CodexPersonaJobRunner:
             stage="completed",
             message="OpenClaw 分身 Agent 已部署完成。",
             openclaw_agent_id=agent_id,
+            openclaw_requested_agent_id=normalized_requested_agent_id,
+            openclaw_suggested_agent_id=str(agent_profile.get("agent_slug", "")).strip() or None,
             openclaw_workspace_path=str(workspace_path),
             openclaw_docs_url=build_openclaw_docs_url(),
+            openclaw_chat_url=build_openclaw_chat_url(agent_id),
             retry_available=False,
             retry_label=None,
         )
@@ -1495,9 +1676,34 @@ class AppHandler(BaseHTTPRequestHandler):
     server: "PersonaGeneratorServer"
 
     def do_GET(self) -> None:
-        request_path = urlparse(self.path).path
+        parsed_url = urlparse(self.path)
+        request_path = parsed_url.path
         if request_path == "/":
             self._serve_index()
+            return
+        if request_path == "/chat":
+            query = parse_qs(parsed_url.query)
+            agent_id = str((query.get("agent_id") or [""])[0]).strip()
+            if not agent_id:
+                self._json_response({"message": "缺少 agent_id。"}, HTTPStatus.BAD_REQUEST)
+                return
+            self._serve_chat(agent_id)
+            return
+        if request_path == "/api/openclaw-chat/history":
+            query = parse_qs(parsed_url.query)
+            agent_id = str((query.get("agent_id") or [""])[0]).strip()
+            if not agent_id:
+                self._json_response({"message": "缺少 agent_id。"}, HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                payload = self.server.runner.load_openclaw_chat_history(agent_id)
+            except ValueError as exc:
+                self._json_response({"message": str(exc)}, HTTPStatus.BAD_REQUEST)
+                return
+            except RuntimeError as exc:
+                self._json_response({"message": str(exc)}, HTTPStatus.BAD_GATEWAY)
+                return
+            self._json_response(payload, HTTPStatus.OK)
             return
         if request_path.startswith("/api/jobs/"):
             job_id = request_path.rsplit("/", 1)[-1]
@@ -1561,15 +1767,37 @@ class AppHandler(BaseHTTPRequestHandler):
         if self.path == "/api/deploy-openclaw":
             payload = self._read_json_body()
             job_id = str(payload.get("job_id", "")).strip()
+            agent_id = str(payload.get("agent_id", "")).strip()
             if not job_id:
                 self._json_response({"message": "缺少 job_id。"}, HTTPStatus.BAD_REQUEST)
                 return
             try:
-                deploy_job_id = self.server.runner.start_deploy_job(job_id)
+                deploy_job_id = self.server.runner.start_deploy_job(job_id, agent_id or None)
+            except AgentConflictError as exc:
+                self._json_response({"message": str(exc)}, HTTPStatus.CONFLICT)
+                return
             except ValueError as exc:
                 self._json_response({"message": str(exc)}, HTTPStatus.BAD_REQUEST)
                 return
             self._json_response({"job_id": deploy_job_id}, HTTPStatus.OK)
+            return
+
+        if self.path == "/api/openclaw-chat/send":
+            payload = self._read_json_body()
+            agent_id = str(payload.get("agent_id", "")).strip()
+            message = str(payload.get("message", "")).strip()
+            if not agent_id:
+                self._json_response({"message": "缺少 agent_id。"}, HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                response = self.server.runner.send_openclaw_chat_message(agent_id, message)
+            except ValueError as exc:
+                self._json_response({"message": str(exc)}, HTTPStatus.BAD_REQUEST)
+                return
+            except RuntimeError as exc:
+                self._json_response({"message": str(exc)}, HTTPStatus.BAD_GATEWAY)
+                return
+            self._json_response(response, HTTPStatus.OK)
             return
 
         if self.path == "/api/retry":
@@ -1607,6 +1835,23 @@ class AppHandler(BaseHTTPRequestHandler):
             "__CODEX_REASONING_EFFORT__",
             html_lib.escape(self.server.codex_runtime_config["reasoning_effort"]),
         )
+        encoded = html.encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def _serve_chat(self, agent_id: str) -> None:
+        template_path = (
+            self.server.repo_root
+            / "skills"
+            / "persona-vault-generator-app"
+            / "templates"
+            / "chat.html"
+        )
+        html = template_path.read_text(encoding="utf-8")
+        html = html.replace("__CHAT_AGENT_ID__", html_lib.escape(agent_id))
         encoded = html.encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/html; charset=utf-8")
