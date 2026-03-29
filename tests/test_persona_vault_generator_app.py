@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import socket
 import tempfile
 import threading
 import textwrap
@@ -665,6 +666,32 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
         self.assertEqual(len(events), 2)
         self.assertEqual(events[0]["type"], "thread.started")
         self.assertEqual(events[1]["type"], "message.delta")
+
+    def test_resolve_server_port_keeps_requested_port_when_available(self):
+        module = load_generator_module()
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            available_port = probe.getsockname()[1]
+
+        resolved_port = module.resolve_server_port("127.0.0.1", available_port)
+
+        self.assertEqual(resolved_port, available_port)
+
+    def test_resolve_server_port_falls_forward_when_requested_port_is_busy(self):
+        module = load_generator_module()
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:
+            occupied.bind(("127.0.0.1", 0))
+            occupied.listen()
+            busy_port = occupied.getsockname()[1]
+
+            resolved_port = module.resolve_server_port("127.0.0.1", busy_port)
+
+        self.assertGreater(resolved_port, busy_port)
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", resolved_port))
 
     def test_http_server_exposes_form_and_job_endpoints(self):
         module = load_generator_module()

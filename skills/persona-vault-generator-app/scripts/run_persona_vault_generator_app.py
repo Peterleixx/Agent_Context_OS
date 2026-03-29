@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -51,6 +52,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def open_browser(url: str) -> None:
     webbrowser.open(url)
+
+
+def resolve_server_port(host: str, requested_port: int, max_attempts: int = 100) -> int:
+    for offset in range(max_attempts):
+        candidate_port = requested_port + offset
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                probe.bind((host, candidate_port))
+            except OSError:
+                continue
+        return candidate_port
+    raise RuntimeError(
+        f"无法从端口 {requested_port} 开始找到可用端口，已连续探测 {max_attempts} 个端口。"
+    )
 
 
 def split_path_mappings(path_mappings: list[dict[str, Any]]) -> dict[str, list[str]]:
@@ -1499,9 +1515,10 @@ def main() -> int:
     working_directory = Path(args.working_directory).expanduser().resolve()
     codex_runtime_config = resolve_codex_runtime_config()
     runner = CodexPersonaJobRunner(repo_root, working_directory, codex_runtime_config)
+    resolved_port = resolve_server_port(args.host, args.port)
     server = create_server(
         args.host,
-        args.port,
+        resolved_port,
         repo_root,
         runner,
         open_obsidian_vault,
