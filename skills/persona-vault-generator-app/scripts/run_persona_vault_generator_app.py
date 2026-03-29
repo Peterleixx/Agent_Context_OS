@@ -430,6 +430,23 @@ def build_openclaw_agent_profile(
     render_profile: dict[str, Any],
     renderer_module: Any,
 ) -> dict[str, Any]:
+    def normalize_string_items(value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        normalized: list[str] = []
+        for item in value:
+            if item is None:
+                continue
+            if isinstance(item, str):
+                text = item.strip()
+            elif isinstance(item, dict):
+                text = str(item.get("title") or item.get("summary") or "").strip()
+            else:
+                text = str(item).strip()
+            if text:
+                normalized.append(text)
+        return normalized
+
     primary_profile = renderer_module.load_markdown_if_exists(
         vault_path / "00 - Profile" / "主要人物画像.md"
     )
@@ -457,18 +474,10 @@ def build_openclaw_agent_profile(
     ]
     top_capabilities = [item for item in top_capabilities if item]
 
-    keyword_chips = render_profile.get("keyword_chips", [])
-    if not isinstance(keyword_chips, list):
-        keyword_chips = []
-    focus_items = render_profile.get("focus_items", [])
-    if not isinstance(focus_items, list):
-        focus_items = []
-    work_style_items = render_profile.get("work_style_items", [])
-    if not isinstance(work_style_items, list):
-        work_style_items = []
-    public_summary = render_profile.get("public_summary", [])
-    if not isinstance(public_summary, list):
-        public_summary = []
+    keyword_chips = normalize_string_items(render_profile.get("keyword_chips", []))
+    focus_items = normalize_string_items(render_profile.get("focus_items", []))
+    work_style_items = normalize_string_items(render_profile.get("work_style_items", []))
+    public_summary = normalize_string_items(render_profile.get("public_summary", []))
 
     base_name = derive_default_agent_slug(vault_path.name)
     display_name = role_summary or f"{vault_path.name} 分身"

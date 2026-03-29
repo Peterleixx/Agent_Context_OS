@@ -435,6 +435,27 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
             ["openclaw", "gateway", "restart", "--json"],
         )
 
+    def test_build_openclaw_agent_profile_normalizes_non_string_work_style_items(self):
+        module = load_generator_module()
+        repo_root = Path(__file__).resolve().parents[1]
+        renderer = module.load_renderer_module(repo_root)
+        vault_dir = self._create_demo_vault()
+
+        payload = module.build_openclaw_agent_profile(
+            vault_dir,
+            {
+                "capability_metrics": [],
+                "keyword_chips": ["Agent 工作流"],
+                "focus_items": ["PersonaVault 到 OpenClaw 的画像落地"],
+                "work_style_items": [{"title": "先校验约束"}, 42, None],
+                "public_summary": ["擅长把复杂工作流压缩成可交付资产。"],
+            },
+            renderer,
+        )
+
+        self.assertIn("先校验约束；42", payload["soul_summary"])
+        self.assertNotIn("None", payload["soul_summary"])
+
     def test_run_deploy_job_uses_setup_then_add_agent_then_start_gateway(self):
         module = load_generator_module()
         repo_root = Path(__file__).resolve().parents[1]
