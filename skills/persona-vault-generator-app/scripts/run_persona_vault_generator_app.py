@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import importlib.util
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -311,10 +314,12 @@ def build_generation_prompt(repo_root: Path, payload: dict[str, Any], working_di
         "- The primary profile file MUST be `00 - Profile/主要人物画像.md`.\n"
         "- Generate Home.md, profile support files, capabilities, projects, evidence, policies, source map, and audit files.\n"
         "- You MUST also write `.persona-system/render-profile.json` with machine-readable rendering data.\n"
+        "- You MUST also write `.persona-system/openclaw-agent.json` for one-click OpenClaw deployment.\n"
         "- `01 - Capabilities/能力地图.md` MUST contain a `## 核心能力总览` Markdown table.\n"
         "- The `核心能力总览` table MUST include columns: `能力 | 当前判断 | 置信度 | 图标 | 关键词`.\n"
         "- Create or refresh `00 - Profile/About Me.md`, `00 - Profile/Current Focus.md`, `00 - Profile/Values And Preferences.md`, and `00 - Profile/Work History.md`.\n"
         "- `render-profile.json` MUST include: `generation_context`, `profile_facets`, `keyword_chips`, `focus_items`, `work_style_items`, `value_cards`, `capability_metrics`, `project_capability_matrix`, and `public_summary`.\n"
+        "- `openclaw-agent.json` MUST include: `agent_slug`, `display_name`, `soul_summary`, `agent_rules`, `user_model`, `identity_card`, and `source_snapshot`.\n"
         "- Every capability metric in `render-profile.json` MUST have `icon`, `title`, `short_title`, `judgment`, `confidence`, and `score`.\n"
         "- `profile_facets` are for key profile icon cards and every item MUST have `icon`, `title`, and `summary`.\n"
         "- If `github_public_data` is present, use it as authorized external evidence and reflect it in source map, project summaries, and render-profile external source cards.\n"
@@ -353,6 +358,164 @@ def write_text_if_missing(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def slugify_agent_id(value: str) -> str:
+    raw = value.strip().lower()
+    raw = re.sub(r"[^a-z0-9]+", "-", raw)
+    raw = raw.strip("-")
+    return raw or "persona-vault"
+
+
+def derive_default_agent_slug(vault_name: str) -> str:
+    raw = vault_name.strip().lower()
+    while raw.count("-") >= 3:
+        prefix, _, suffix = raw.rpartition("-")
+        if len(suffix) >= 5 and re.fullmatch(r"[0-9a-z]+", suffix):
+            raw = prefix
+            continue
+        if len(suffix) <= 2 and re.fullmatch(r"[0-9]+", suffix):
+            raw = prefix
+            continue
+        break
+    return slugify_agent_id(raw)
+
+
+def resolve_unique_agent_id(base_slug: str, home_dir: Path | None = None) -> str:
+    home_dir = (home_dir or Path.home()).expanduser().resolve()
+    state_dir = home_dir / ".openclaw"
+    candidate = slugify_agent_id(base_slug)
+    suffix = 2
+    while (
+        (state_dir / f"workspace-{candidate}").exists()
+        or (state_dir / "agents" / candidate).exists()
+    ):
+        candidate = f"{slugify_agent_id(base_slug)}-{suffix}"
+        suffix += 1
+    return candidate
+
+
+def build_openclaw_setup_command() -> list[str]:
+    return ["openclaw", "setup", "--non-interactive"]
+
+
+def build_openclaw_add_agent_command(agent_id: str, workspace_path: Path) -> list[str]:
+    return [
+        "openclaw",
+        "agents",
+        "add",
+        agent_id,
+        "--non-interactive",
+        "--workspace",
+        str(workspace_path),
+    ]
+
+
+def build_openclaw_health_command() -> list[str]:
+    return ["openclaw", "health", "--json"]
+
+
+def build_openclaw_gateway_start_command() -> list[str]:
+    return ["openclaw", "gateway", "start", "--json"]
+
+
+def build_openclaw_gateway_restart_command() -> list[str]:
+    return ["openclaw", "gateway", "restart", "--json"]
+
+
+def build_openclaw_docs_url() -> str:
+    return "https://docs.openclaw.ai/start/openclaw"
+
+
+def build_openclaw_agent_profile(
+    vault_path: Path,
+    render_profile: dict[str, Any],
+    renderer_module: Any,
+) -> dict[str, Any]:
+    primary_profile = renderer_module.load_markdown_if_exists(
+        vault_path / "00 - Profile" / "主要人物画像.md"
+    )
+    role_summary = ""
+    persona_lines: list[str] = []
+    preference_lines: list[str] = []
+    if primary_profile:
+        role_summary = renderer_module.extract_first_paragraph(
+            primary_profile.sections.get("当前角色定位", [])
+        )
+        persona_lines = renderer_module.extract_bullets(
+            primary_profile.sections.get("当前关注主题", [])
+        )
+        preference_lines = renderer_module.extract_bullets(
+            primary_profile.sections.get("稳定偏好与决策风格", [])
+        )
+
+    capability_metrics = render_profile.get("capability_metrics", [])
+    if not isinstance(capability_metrics, list):
+        capability_metrics = []
+    top_capabilities = [
+        str(item.get("short_title") or item.get("title") or "").strip()
+        for item in capability_metrics[:3]
+        if isinstance(item, dict)
+    ]
+    top_capabilities = [item for item in top_capabilities if item]
+
+    keyword_chips = render_profile.get("keyword_chips", [])
+    if not isinstance(keyword_chips, list):
+        keyword_chips = []
+    focus_items = render_profile.get("focus_items", [])
+    if not isinstance(focus_items, list):
+        focus_items = []
+    work_style_items = render_profile.get("work_style_items", [])
+    if not isinstance(work_style_items, list):
+        work_style_items = []
+    public_summary = render_profile.get("public_summary", [])
+    if not isinstance(public_summary, list):
+        public_summary = []
+
+    base_name = derive_default_agent_slug(vault_path.name)
+    display_name = role_summary or f"{vault_path.name} 分身"
+    soul_parts = [
+        role_summary or "继承 PersonaVault 画像的 OpenClaw 分身。",
+        "关注重点：" + "；".join(item for item in persona_lines[:3] if item) if persona_lines else "",
+        "核心能力：" + "、".join(item for item in top_capabilities[:3] if item) if top_capabilities else "",
+        "工作方式：" + "；".join(item for item in (work_style_items or preference_lines)[:3] if item)
+        if (work_style_items or preference_lines)
+        else "",
+    ]
+    soul_summary = "\n".join(item for item in soul_parts if item)
+
+    agent_rule_lines = [
+        "优先遵循 PersonaVault 已明确的能力边界、判断风格与可公开表达范围。",
+        "在信息不足时保守表述，不要补造经历、数据或关系。",
+    ]
+    if public_summary:
+        agent_rule_lines.append(
+            "可稳定复述的公开摘要：" + "；".join(str(item).strip() for item in public_summary[:3] if str(item).strip())
+        )
+    agent_rules = "\n".join(f"- {line}" for line in agent_rule_lines)
+
+    user_model = "\n".join(
+        [
+            f"- 服务对象画像来自 {vault_path.name} 的 PersonaVault。",
+            "- 对外协作时默认保持证据驱动、约束优先、最小可行交付。",
+        ]
+    )
+    identity_bits = [display_name] + [str(item).strip() for item in keyword_chips[:3] if str(item).strip()]
+    identity_card = " | ".join(identity_bits)
+
+    return {
+        "agent_slug": base_name,
+        "display_name": display_name,
+        "soul_summary": soul_summary,
+        "agent_rules": agent_rules,
+        "user_model": user_model,
+        "identity_card": identity_card,
+        "source_snapshot": {
+            "vault_path": str(vault_path),
+            "render_profile_path": str(vault_path / ".persona-system" / "render-profile.json"),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        },
+    }
+
+
 def open_obsidian_vault(vault_path: str) -> dict[str, Any]:
     target = Path(vault_path).expanduser().resolve()
     if not target.exists():
@@ -370,9 +533,24 @@ def open_obsidian_vault(vault_path: str) -> dict[str, Any]:
     return {"ok": True, "message": "opened"}
 
 
+def open_local_path(target_path: str) -> dict[str, Any]:
+    target = Path(target_path).expanduser().resolve()
+    if not target.exists():
+        return {"ok": False, "message": f"Path does not exist: {target}"}
+    result = subprocess.run(
+        ["open", str(target)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return {"ok": False, "message": result.stderr.strip() or "Failed to open local path."}
+    return {"ok": True, "message": "opened"}
+
+
 class JobState:
     def __init__(self, job_id: str) -> None:
         self.job_id = job_id
+        self.source_job_id: str | None = None
         self.status = "running"
         self.stage = "discovering_sources"
         self.message = "正在整理输入来源。"
@@ -381,11 +559,15 @@ class JobState:
         self.site_path: str | None = None
         self.site_url: str | None = None
         self.can_open_obsidian = False
+        self.openclaw_agent_id: str | None = None
+        self.openclaw_workspace_path: str | None = None
+        self.openclaw_docs_url: str | None = None
         self.raw_output: list[str] = []
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "job_id": self.job_id,
+            "source_job_id": self.source_job_id,
             "status": self.status,
             "stage": self.stage,
             "message": self.message,
@@ -394,6 +576,9 @@ class JobState:
             "site_path": self.site_path,
             "site_url": self.site_url,
             "can_open_obsidian": self.can_open_obsidian,
+            "openclaw_agent_id": self.openclaw_agent_id,
+            "openclaw_workspace_path": self.openclaw_workspace_path,
+            "openclaw_docs_url": self.openclaw_docs_url,
         }
 
 
@@ -436,6 +621,30 @@ class CodexPersonaJobRunner:
         thread.start()
         return edit_job_id
 
+    def start_deploy_job(self, job_id: str) -> str:
+        source_job = self.get_job(job_id)
+        if source_job is None:
+            raise ValueError("job not found")
+        vault_path = str(source_job.get("vault_path", "")).strip()
+        if not vault_path:
+            raise ValueError("job has no generated PersonaVault")
+        deploy_job_id = f"job_{uuid.uuid4().hex[:10]}"
+        state = JobState(job_id=deploy_job_id)
+        state.source_job_id = job_id
+        state.vault_path = vault_path
+        state.profile_path = str(source_job.get("profile_path", "")).strip() or None
+        state.site_path = str(source_job.get("site_path", "")).strip() or None
+        state.site_url = str(source_job.get("site_url", "")).strip() or None
+        with self._lock:
+            self._jobs[deploy_job_id] = state
+        thread = threading.Thread(
+            target=self._run_deploy_job,
+            args=(deploy_job_id, Path(vault_path)),
+            daemon=True,
+        )
+        thread.start()
+        return deploy_job_id
+
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
             state = self._jobs.get(job_id)
@@ -468,6 +677,7 @@ class CodexPersonaJobRunner:
         self._ensure_capability_map_table(vault_path, render_profile)
         self._write_github_source_map(vault_path, github_public_data)
         self._write_render_profile_json(vault_path, render_profile)
+        self._write_openclaw_agent_profile_json(vault_path, render_profile, renderer_module)
         return render_profile
 
     def _build_external_source_cards(
@@ -699,6 +909,21 @@ class CodexPersonaJobRunner:
             encoding="utf-8",
         )
 
+    def _write_openclaw_agent_profile_json(
+        self,
+        vault_path: Path,
+        render_profile: dict[str, Any],
+        renderer_module: Any,
+    ) -> None:
+        system_dir = vault_path / ".persona-system"
+        system_dir.mkdir(parents=True, exist_ok=True)
+        path = system_dir / "openclaw-agent.json"
+        payload = build_openclaw_agent_profile(vault_path, render_profile, renderer_module)
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
     def _run_job(self, job_id: str, payload: dict[str, Any]) -> None:
         self._update_job(job_id, stage="discovering_sources", message="正在整理输入来源。")
         payload = enrich_payload_with_github_data(payload)
@@ -776,6 +1001,161 @@ class CodexPersonaJobRunner:
             message = result.stderr.strip() or result.stdout.strip() or "静态网页导出失败。"
             return {"ok": False, "message": message}
         return {"ok": True, "site_path": str(site_path), "message": "PersonaVault 与网页预览已同步完成。"}
+
+    def _load_openclaw_agent_profile(self, vault_path: Path) -> dict[str, Any]:
+        path = vault_path / ".persona-system" / "openclaw-agent.json"
+        if not path.exists():
+            raise FileNotFoundError(f"缺少 OpenClaw 部署画像: {path}")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("OpenClaw 部署画像格式无效。")
+        return data
+
+    def _run_checked_command(self, command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+        result = subprocess.run(
+            command,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            message = result.stderr.strip() or result.stdout.strip() or "command failed"
+            raise RuntimeError(message)
+        return result
+
+    def _write_openclaw_workspace_files(
+        self,
+        workspace_path: Path,
+        agent_profile: dict[str, Any],
+        vault_path: Path,
+    ) -> None:
+        workspace_path.mkdir(parents=True, exist_ok=True)
+        display_name = str(agent_profile.get("display_name", "")).strip() or "PersonaVault 分身"
+        soul_summary = str(agent_profile.get("soul_summary", "")).strip()
+        agent_rules = str(agent_profile.get("agent_rules", "")).strip()
+        user_model = str(agent_profile.get("user_model", "")).strip()
+        identity_card = str(agent_profile.get("identity_card", "")).strip()
+
+        files = {
+            "SOUL.md": "\n".join(
+                [
+                    "# SOUL",
+                    "",
+                    f"你是 `{display_name}`，这是一个由 PersonaVault 部署出的 OpenClaw 分身。",
+                    "",
+                    "## Persona Summary",
+                    "",
+                    soul_summary or "保持保守、证据驱动、可交付导向的画像风格。",
+                    "",
+                ]
+            ),
+            "AGENTS.md": "\n".join(
+                [
+                    "# AGENTS",
+                    "",
+                    "## Session Startup",
+                    "",
+                    agent_rules or "- 优先遵循 PersonaVault 的能力边界和保守表达原则。",
+                    "",
+                    "## Red Lines",
+                    "",
+                    "- 不要虚构经历、数据、组织关系或未授权事实。",
+                    "- 不要绕过当前 PersonaVault 明确写出的可说边界和脱敏要求。",
+                    "",
+                ]
+            ),
+            "USER.md": "\n".join(["# USER", "", user_model or "- 当前服务对象来自对应 PersonaVault。"]),
+            "IDENTITY.md": "\n".join(["# IDENTITY", "", identity_card or display_name]),
+            "PERSONA_VAULT_SOURCE.md": "\n".join(
+                [
+                    "# PersonaVault Source",
+                    "",
+                    f"- Source Vault: {vault_path}",
+                    f"- Deployment Profile: {vault_path / '.persona-system' / 'openclaw-agent.json'}",
+                    f"- Render Profile: {vault_path / '.persona-system' / 'render-profile.json'}",
+                    "",
+                ]
+            ),
+        }
+        for file_name, content in files.items():
+            (workspace_path / file_name).write_text(content + "\n", encoding="utf-8")
+
+    def _run_deploy_job(self, job_id: str, vault_path: Path) -> None:
+        self._update_job(job_id, stage="deploy_preparing_profile", message="正在准备 OpenClaw 部署画像。")
+        try:
+            agent_profile = self._load_openclaw_agent_profile(vault_path)
+        except Exception as exc:
+            self._update_job(job_id, status="failed", stage="failed", message=str(exc))
+            return
+
+        self._update_job(job_id, stage="deploy_validating_openclaw", message="正在校验本机 OpenClaw 环境。")
+        if shutil.which("openclaw") is None:
+            self._update_job(
+                job_id,
+                status="failed",
+                stage="failed",
+                message="未在 PATH 中找到 openclaw CLI。",
+            )
+            return
+
+        home_dir = Path.home().expanduser().resolve()
+        state_dir = home_dir / ".openclaw"
+        config_path = state_dir / "openclaw.json"
+        try:
+            if not config_path.exists():
+                self._run_checked_command(build_openclaw_setup_command(), self.working_directory)
+        except Exception as exc:
+            self._update_job(job_id, status="failed", stage="failed", message=f"初始化 OpenClaw 失败: {exc}")
+            return
+
+        agent_id = resolve_unique_agent_id(str(agent_profile.get("agent_slug", "")), home_dir)
+        workspace_path = state_dir / f"workspace-{agent_id}"
+        self._update_job(
+            job_id,
+            stage="deploy_creating_workspace",
+            message="正在创建分身 workspace 并注册 agent。",
+        )
+        try:
+            self._run_checked_command(
+                build_openclaw_add_agent_command(agent_id, workspace_path),
+                self.working_directory,
+            )
+        except Exception as exc:
+            self._update_job(job_id, status="failed", stage="failed", message=f"注册 OpenClaw agent 失败: {exc}")
+            return
+
+        self._update_job(job_id, stage="deploy_writing_bootstrap", message="正在写入 persona bootstrap 文件。")
+        try:
+            self._write_openclaw_workspace_files(workspace_path, agent_profile, vault_path)
+        except Exception as exc:
+            self._update_job(job_id, status="failed", stage="failed", message=f"写入 workspace 文件失败: {exc}")
+            return
+
+        self._update_job(job_id, stage="deploy_starting_gateway", message="正在启动或重启 OpenClaw gateway。")
+        try:
+            health = subprocess.run(
+                build_openclaw_health_command(),
+                cwd=str(self.working_directory),
+                capture_output=True,
+                text=True,
+            )
+            if health.returncode == 0:
+                self._run_checked_command(build_openclaw_gateway_restart_command(), self.working_directory)
+            else:
+                self._run_checked_command(build_openclaw_gateway_start_command(), self.working_directory)
+        except Exception as exc:
+            self._update_job(job_id, status="failed", stage="failed", message=f"启动 gateway 失败: {exc}")
+            return
+
+        self._update_job(
+            job_id,
+            status="completed",
+            stage="completed",
+            message="OpenClaw 分身 Agent 已部署完成。",
+            openclaw_agent_id=agent_id,
+            openclaw_workspace_path=str(workspace_path),
+            openclaw_docs_url=build_openclaw_docs_url(),
+        )
 
     def _run_edit_job(self, job_id: str, vault_path: Path, instruction: str) -> None:
         self._update_job(job_id, stage="preparing_prompt", message="正在整理自然语言修改指令。")
@@ -869,6 +1249,14 @@ class AppHandler(BaseHTTPRequestHandler):
             self._json_response(result, status)
             return
 
+        if self.path == "/api/open-path":
+            payload = self._read_json_body()
+            local_path = str(payload.get("path", "")).strip()
+            result = self.server.path_opener(local_path)
+            status = HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST
+            self._json_response(result, status)
+            return
+
         if self.path == "/api/edit":
             payload = self._read_json_body()
             job_id = str(payload.get("job_id", "")).strip()
@@ -882,6 +1270,20 @@ class AppHandler(BaseHTTPRequestHandler):
                 self._json_response({"message": str(exc)}, HTTPStatus.BAD_REQUEST)
                 return
             self._json_response({"job_id": edit_job_id}, HTTPStatus.OK)
+            return
+
+        if self.path == "/api/deploy-openclaw":
+            payload = self._read_json_body()
+            job_id = str(payload.get("job_id", "")).strip()
+            if not job_id:
+                self._json_response({"message": "缺少 job_id。"}, HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                deploy_job_id = self.server.runner.start_deploy_job(job_id)
+            except ValueError as exc:
+                self._json_response({"message": str(exc)}, HTTPStatus.BAD_REQUEST)
+                return
+            self._json_response({"job_id": deploy_job_id}, HTTPStatus.OK)
             return
 
         self._json_response({"message": "not found"}, HTTPStatus.NOT_FOUND)
@@ -939,12 +1341,14 @@ class PersonaGeneratorServer(ThreadingHTTPServer):
         repo_root: Path,
         runner: Any,
         obsidian_opener: Any,
+        path_opener: Any,
         working_directory: Path,
     ) -> None:
         super().__init__(server_address, handler_class)
         self.repo_root = repo_root
         self.runner = runner
         self.obsidian_opener = obsidian_opener
+        self.path_opener = path_opener
         self.working_directory = working_directory
 
 
@@ -954,6 +1358,7 @@ def create_server(
     repo_root: Path,
     runner: Any,
     obsidian_opener: Any,
+    path_opener: Any,
     working_directory: Path,
 ) -> PersonaGeneratorServer:
     return PersonaGeneratorServer(
@@ -962,6 +1367,7 @@ def create_server(
         repo_root.resolve(),
         runner,
         obsidian_opener,
+        path_opener,
         working_directory.resolve(),
     )
 
@@ -977,6 +1383,7 @@ def main() -> int:
         repo_root,
         runner,
         open_obsidian_vault,
+        open_local_path,
         working_directory,
     )
     url = f"http://{args.host}:{server.server_address[1]}"

@@ -2,11 +2,12 @@ import importlib.util
 import json
 import tempfile
 import threading
+import textwrap
 import urllib.error
 import urllib.request
 from pathlib import Path
-import textwrap
 import unittest
+from unittest import mock
 
 
 def load_generator_module():
@@ -29,6 +30,7 @@ class FakeRunner:
     def __init__(self):
         self.last_payload = None
         self.last_edit = None
+        self.last_deploy = None
         self.job = {
             "job_id": "job_test",
             "status": "running",
@@ -44,7 +46,18 @@ class FakeRunner:
         self.last_edit = {"job_id": job_id, "instruction": instruction}
         return "job_edit"
 
+    def start_deploy_job(self, job_id):
+        self.last_deploy = {"job_id": job_id}
+        return "job_deploy"
+
     def get_job(self, job_id):
+        if job_id == "job_deploy":
+            return {
+                "job_id": "job_deploy",
+                "status": "running",
+                "stage": "deploy_preparing_profile",
+                "message": "正在准备 OpenClaw 部署画像。",
+            }
         if job_id == "job_edit":
             return {
                 "job_id": "job_edit",
@@ -147,6 +160,74 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
         self.assertEqual(data, {"ok": True})
         self.assertEqual(captured["url"], "https://api.github.com/users/openai")
         self.assertEqual(captured["timeout"], module.GITHUB_FETCH_TIMEOUT_SECONDS)
+
+    def _create_demo_vault(self) -> Path:
+        vault_dir = Path(tempfile.mkdtemp(prefix="persona-vault-deploy-"))
+        (vault_dir / "00 - Profile").mkdir(parents=True)
+        (vault_dir / "01 - Capabilities").mkdir(parents=True)
+        (vault_dir / "02 - Projects").mkdir(parents=True)
+        (vault_dir / ".persona-system").mkdir(parents=True)
+        (vault_dir / "Home.md").write_text("# Home\n", encoding="utf-8")
+        (vault_dir / "00 - Profile" / "主要人物画像.md").write_text(
+            textwrap.dedent(
+                """
+                # 主要人物画像
+
+                ## 当前角色定位
+
+                AI Agent 工作流产品与工程设计者。
+
+                ## 当前关注主题
+
+                - PersonaVault 到 OpenClaw 的画像落地
+                - 复杂工作流压缩与交付
+
+                ## 稳定偏好与决策风格
+
+                - 先校验约束，再推进执行
+                - 偏好证据驱动与最小可行落地
+                """
+            ).strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        (vault_dir / "01 - Capabilities" / "能力地图.md").write_text(
+            textwrap.dedent(
+                """
+                # 能力地图
+
+                ## 核心能力总览
+
+                | 能力 | 当前判断 | 置信度 | 图标 | 关键词 |
+                | --- | --- | --- | --- | --- |
+                | 能力-Agent交付封装 | 已形成稳定能力 | 高 | wrench | Agent 工作流, 交付 |
+                """
+            ).strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        (vault_dir / "02 - Projects" / "项目-Context OS Demo.md").write_text(
+            textwrap.dedent(
+                """
+                # 项目-Context OS Demo
+
+                ## 项目定义
+
+                基于 PersonaVault 的本地工作流与 OpenClaw 分身部署演示。
+
+                ## 可见内容
+
+                - 一键部署 OpenClaw 分身
+
+                ## 该项目体现的能力
+
+                - 能力-Agent交付封装
+                """
+            ).strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        return vault_dir
 
     def test_parse_args_supports_open_browser_flag(self):
         module = load_generator_module()
@@ -255,6 +336,7 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
         )
 
         self.assertIn(".persona-system/render-profile.json", prompt)
+        self.assertIn(".persona-system/openclaw-agent.json", prompt)
         self.assertIn("核心能力总览", prompt)
         self.assertIn('"target_scene": "job_jd"', prompt)
         self.assertIn("岗位/JD", prompt)
@@ -285,6 +367,162 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
         self.assertIn("github_public_data", prompt)
         self.assertIn("OpenAI", prompt)
         self.assertIn("codex", prompt)
+
+    def test_enhance_persona_vault_writes_openclaw_agent_profile(self):
+        module = load_generator_module()
+        repo_root = Path(__file__).resolve().parents[1]
+        runner = module.CodexPersonaJobRunner(repo_root, repo_root)
+        vault_dir = self._create_demo_vault()
+
+        render_profile = runner._enhance_persona_vault(
+            vault_dir,
+            {
+                "agents": ["codex"],
+                "path_mappings": [],
+                "links": [],
+                "output_dir": str(vault_dir),
+                "advanced_settings": {
+                    "target_scene": "job_jd",
+                    "job_jd_text": "AI Agent 岗位",
+                    "focus_presets": ["能力亮点"],
+                    "focus_custom": "",
+                    "redaction_profile": "conservative",
+                    "redaction_custom_rules": "",
+                },
+            },
+        )
+
+        self.assertTrue(render_profile)
+        profile_path = vault_dir / ".persona-system" / "openclaw-agent.json"
+        self.assertTrue(profile_path.exists())
+        payload = json.loads(profile_path.read_text(encoding="utf-8"))
+        self.assertTrue(payload["agent_slug"].startswith("persona-vault-deploy"))
+        self.assertIn("AI Agent 工作流产品与工程设计者", payload["soul_summary"])
+        self.assertIn("Agent 工作流", payload["identity_card"])
+        self.assertEqual(payload["source_snapshot"]["vault_path"], str(vault_dir))
+
+    def test_resolve_unique_agent_id_appends_suffix_when_workspace_exists(self):
+        module = load_generator_module()
+
+        with tempfile.TemporaryDirectory(prefix="openclaw-home-") as temp_dir:
+            home_dir = Path(temp_dir)
+            (home_dir / ".openclaw" / "workspace-persona-vault-deploy").mkdir(parents=True)
+
+            resolved = module.resolve_unique_agent_id("persona-vault-deploy", home_dir)
+
+        self.assertEqual(resolved, "persona-vault-deploy-2")
+
+    def test_build_openclaw_command_helpers_match_expected_cli(self):
+        module = load_generator_module()
+
+        self.assertEqual(module.build_openclaw_setup_command(), ["openclaw", "setup", "--non-interactive"])
+        self.assertEqual(
+            module.build_openclaw_add_agent_command("lobster-twin", Path("/tmp/workspace")),
+            [
+                "openclaw",
+                "agents",
+                "add",
+                "lobster-twin",
+                "--non-interactive",
+                "--workspace",
+                "/tmp/workspace",
+            ],
+        )
+        self.assertEqual(module.build_openclaw_health_command(), ["openclaw", "health", "--json"])
+        self.assertEqual(module.build_openclaw_gateway_start_command(), ["openclaw", "gateway", "start", "--json"])
+        self.assertEqual(
+            module.build_openclaw_gateway_restart_command(),
+            ["openclaw", "gateway", "restart", "--json"],
+        )
+
+    def test_run_deploy_job_uses_setup_then_add_agent_then_start_gateway(self):
+        module = load_generator_module()
+        repo_root = Path(__file__).resolve().parents[1]
+        runner = module.CodexPersonaJobRunner(repo_root, repo_root)
+        vault_dir = self._create_demo_vault()
+        runner._enhance_persona_vault(
+            vault_dir,
+            {
+                "agents": ["codex"],
+                "path_mappings": [],
+                "links": [],
+                "output_dir": str(vault_dir),
+                "advanced_settings": {
+                    "target_scene": "job_jd",
+                    "job_jd_text": "AI Agent 岗位",
+                    "focus_presets": [],
+                    "focus_custom": "",
+                    "redaction_profile": "conservative",
+                    "redaction_custom_rules": "",
+                },
+            },
+        )
+
+        runner._jobs["job_deploy"] = module.JobState("job_deploy")
+        commands = []
+
+        def fake_checked(command, cwd):
+            commands.append(command)
+            return mock.Mock(returncode=0, stdout='{"ok":true}', stderr="")
+
+        fake_home = Path(tempfile.mkdtemp(prefix="fake-openclaw-home-"))
+
+        with (
+            mock.patch.object(module.Path, "home", return_value=fake_home),
+            mock.patch.object(module.shutil, "which", return_value="/usr/local/bin/openclaw"),
+            mock.patch.object(runner, "_run_checked_command", side_effect=fake_checked),
+            mock.patch.object(
+                module.subprocess,
+                "run",
+                return_value=mock.Mock(returncode=1, stdout="", stderr="gateway down"),
+            ),
+        ):
+            runner._run_deploy_job("job_deploy", vault_dir)
+
+        job = runner.get_job("job_deploy")
+        self.assertEqual(job["status"], "completed")
+        self.assertEqual(commands[0], ["openclaw", "setup", "--non-interactive"])
+        self.assertEqual(commands[1][:3], ["openclaw", "agents", "add"])
+        self.assertTrue(commands[1][3].startswith("persona-vault-deploy"))
+        self.assertEqual(commands[1][4], "--non-interactive")
+        self.assertEqual(commands[2], ["openclaw", "gateway", "start", "--json"])
+        workspace = fake_home / ".openclaw" / f"workspace-{job['openclaw_agent_id']}"
+        self.assertTrue((workspace / "SOUL.md").exists())
+        self.assertTrue((workspace / "AGENTS.md").exists())
+        self.assertTrue((workspace / "USER.md").exists())
+        self.assertTrue((workspace / "IDENTITY.md").exists())
+        self.assertTrue((workspace / "PERSONA_VAULT_SOURCE.md").exists())
+
+    def test_run_deploy_job_fails_when_openclaw_missing(self):
+        module = load_generator_module()
+        repo_root = Path(__file__).resolve().parents[1]
+        runner = module.CodexPersonaJobRunner(repo_root, repo_root)
+        vault_dir = self._create_demo_vault()
+        runner._enhance_persona_vault(
+            vault_dir,
+            {
+                "agents": ["codex"],
+                "path_mappings": [],
+                "links": [],
+                "output_dir": str(vault_dir),
+                "advanced_settings": {
+                    "target_scene": "job_jd",
+                    "job_jd_text": "",
+                    "focus_presets": [],
+                    "focus_custom": "",
+                    "redaction_profile": "conservative",
+                    "redaction_custom_rules": "",
+                },
+            },
+        )
+        runner._jobs["job_fail"] = module.JobState("job_fail")
+
+        with mock.patch.object(module.shutil, "which", return_value=None):
+            runner._run_deploy_job("job_fail", vault_dir)
+
+        job = runner.get_job("job_fail")
+        self.assertEqual(job["status"], "failed")
+        self.assertIn("openclaw CLI", job["message"])
 
     def test_build_edit_prompt_mentions_vault_and_render_profile_sync(self):
         module = load_generator_module()
@@ -322,7 +560,7 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[1]
         runner = FakeRunner()
         opener = FakeOpener()
-        httpd = module.create_server("127.0.0.1", 0, repo_root, runner, opener, repo_root)
+        httpd = module.create_server("127.0.0.1", 0, repo_root, runner, opener, opener, repo_root)
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)
         thread.start()
         base_url = f"http://127.0.0.1:{httpd.server_address[1]}"
@@ -388,6 +626,18 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
             self.assertEqual(runner.last_edit["job_id"], "job_test")
             self.assertEqual(runner.last_edit["instruction"], "强化代表项目，弱化投资内容")
 
+            deploy_request = urllib.request.Request(
+                f"{base_url}/api/deploy-openclaw",
+                data=json.dumps({"job_id": "job_test"}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            deploy_response = json.loads(
+                urllib.request.urlopen(deploy_request).read().decode("utf-8")
+            )
+            self.assertEqual(deploy_response["job_id"], "job_deploy")
+            self.assertEqual(runner.last_deploy["job_id"], "job_test")
+
             open_request = urllib.request.Request(
                 f"{base_url}/api/open-obsidian",
                 data=json.dumps({"vault_path": "/tmp/PersonaVault"}).encode("utf-8"),
@@ -422,7 +672,7 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
                 "site_url": "/generated/job_test",
             }
 
-            httpd = module.create_server("127.0.0.1", 0, repo_root, runner, opener, repo_root)
+            httpd = module.create_server("127.0.0.1", 0, repo_root, runner, opener, opener, repo_root)
             thread = threading.Thread(target=httpd.serve_forever, daemon=True)
             thread.start()
             base_url = f"http://127.0.0.1:{httpd.server_address[1]}"
@@ -448,7 +698,9 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
 
         self.assertIn("打开网页预览", html)
         self.assertIn("自然语言修改 / 重写", html)
+        self.assertIn("部署分身 Agent", html)
         self.assertIn("/api/edit", html)
+        self.assertIn("/api/deploy-openclaw", html)
         self.assertNotIn("即将跳转到网页预览", html)
         self.assertNotIn("pendingRedirect = setTimeout", html)
 
