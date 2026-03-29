@@ -65,6 +65,19 @@
       </section>
 
       <section class="mt-8 rounded-[1.75rem] border border-stone-200 bg-white p-7 shadow-sm">
+        <div class="mb-6">
+          <div class="text-xs font-semibold uppercase tracking-[0.3em] text-stone-500">External Public Sources</div>
+          <h2 class="mt-2 text-2xl font-semibold text-stone-900">外部公开来源</h2>
+          <p class="mt-2 max-w-3xl text-sm leading-7 text-stone-600">
+            这里展示已授权并被系统提炼过的外部公开资料摘要。当前优先支持 GitHub 公开主页与代表仓库。
+          </p>
+        </div>
+        <div class="grid gap-5 lg:grid-cols-2">
+          {{EXTERNAL_SOURCE_CARDS}}
+        </div>
+      </section>
+
+      <section class="mt-8 rounded-[1.75rem] border border-stone-200 bg-white p-7 shadow-sm">
         <div class="mb-6 flex items-end justify-between gap-4">
           <div>
             <div class="text-xs font-semibold uppercase tracking-[0.3em] text-stone-500">Values And Preferences</div>

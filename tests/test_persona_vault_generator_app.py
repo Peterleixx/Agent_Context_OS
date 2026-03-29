@@ -5,6 +5,7 @@ import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
+import textwrap
 import unittest
 
 
@@ -66,6 +67,87 @@ class FakeOpener:
 
 
 class PersonaVaultGeneratorAppTest(unittest.TestCase):
+    def test_extract_github_owner_from_supported_urls(self):
+        module = load_generator_module()
+
+        self.assertEqual(module.extract_github_owner("https://github.com/openai"), "openai")
+        self.assertEqual(module.extract_github_owner("https://github.com/openai/codex"), "openai")
+        self.assertEqual(module.extract_github_owner("https://github.com/openai/"), "openai")
+        self.assertIsNone(module.extract_github_owner("https://example.com/openai"))
+
+    def test_collect_github_public_data_summarizes_profile_and_repos(self):
+        module = load_generator_module()
+
+        responses = {
+            "https://api.github.com/users/openai": {
+                "login": "openai",
+                "name": "OpenAI",
+                "bio": "AI research and deployment company.",
+                "blog": "https://openai.com",
+                "public_repos": 12,
+                "followers": 999,
+                "following": 1,
+            },
+            "https://api.github.com/users/openai/repos?per_page=6&sort=updated": [
+                {
+                    "name": "codex",
+                    "html_url": "https://github.com/openai/codex",
+                    "description": "Codex CLI and app.",
+                    "language": "Python",
+                    "stargazers_count": 4200,
+                    "fork": False,
+                },
+                {
+                    "name": "evals",
+                    "html_url": "https://github.com/openai/evals",
+                    "description": "Evaluation framework.",
+                    "language": "Python",
+                    "stargazers_count": 3800,
+                    "fork": False,
+                },
+            ],
+        }
+
+        def fake_fetch_json(url):
+            return responses[url]
+
+        data = module.collect_github_public_data(
+            [{"kind": "github", "url": "https://github.com/openai"}],
+            fetch_json=fake_fetch_json,
+        )
+
+        self.assertEqual(len(data), 1)
+        profile = data[0]
+        self.assertEqual(profile["owner"], "openai")
+        self.assertEqual(profile["profile"]["name"], "OpenAI")
+        self.assertEqual(profile["top_languages"], ["Python"])
+        self.assertEqual(profile["repositories"][0]["name"], "codex")
+
+    def test_fetch_json_from_url_uses_timeout(self):
+        module = load_generator_module()
+        captured = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"ok": true}'
+
+        def fake_urlopen(request, timeout):
+            captured["timeout"] = timeout
+            captured["url"] = request.full_url
+            return FakeResponse()
+
+        data = module.fetch_json_from_url("https://api.github.com/users/openai", opener=fake_urlopen)
+
+        self.assertEqual(data, {"ok": True})
+        self.assertEqual(captured["url"], "https://api.github.com/users/openai")
+        self.assertEqual(captured["timeout"], module.GITHUB_FETCH_TIMEOUT_SECONDS)
+
     def test_parse_args_supports_open_browser_flag(self):
         module = load_generator_module()
 
@@ -176,6 +258,33 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
         self.assertIn("核心能力总览", prompt)
         self.assertIn('"target_scene": "job_jd"', prompt)
         self.assertIn("岗位/JD", prompt)
+
+    def test_generation_prompt_mentions_github_public_data_when_present(self):
+        module = load_generator_module()
+        repo_root = Path(__file__).resolve().parents[1]
+
+        prompt = module.build_generation_prompt(
+            repo_root,
+            {
+                "agents": ["codex"],
+                "path_mappings": [],
+                "links": [{"kind": "github", "url": "https://github.com/openai"}],
+                "github_public_data": [
+                    {
+                        "owner": "openai",
+                        "profile_url": "https://github.com/openai",
+                        "profile": {"name": "OpenAI", "bio": "AI company"},
+                        "repositories": [{"name": "codex", "url": "https://github.com/openai/codex"}],
+                        "top_languages": ["Python"],
+                    }
+                ],
+            },
+            Path("/tmp/workdir"),
+        )
+
+        self.assertIn("github_public_data", prompt)
+        self.assertIn("OpenAI", prompt)
+        self.assertIn("codex", prompt)
 
     def test_build_edit_prompt_mentions_vault_and_render_profile_sync(self):
         module = load_generator_module()
@@ -342,6 +451,71 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
         self.assertIn("/api/edit", html)
         self.assertNotIn("即将跳转到网页预览", html)
         self.assertNotIn("pendingRedirect = setTimeout", html)
+
+    def test_enhance_persona_vault_preserves_external_source_cards_without_new_github_data(self):
+        module = load_generator_module()
+        repo_root = Path(__file__).resolve().parents[1]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault_dir = Path(temp_dir) / "PersonaVault"
+            (vault_dir / "00 - Profile").mkdir(parents=True)
+            (vault_dir / "01 - Capabilities").mkdir(parents=True)
+            (vault_dir / ".persona-system").mkdir(parents=True)
+            (vault_dir / "00 - Profile" / "主要人物画像.md").write_text(
+                textwrap.dedent(
+                    """
+                    # 主要人物画像
+
+                    ## 当前角色定位
+
+                    AI Agent 工作流构建者。
+                    """
+                ).strip()
+                + "\n",
+                encoding="utf-8",
+            )
+            (vault_dir / "01 - Capabilities" / "能力地图.md").write_text(
+                textwrap.dedent(
+                    """
+                    # 能力地图
+
+                    ## 核心能力总览
+
+                    | 能力 | 当前判断 | 置信度 | 图标 | 关键词 |
+                    | --- | --- | --- | --- | --- |
+                    | 能力-Agent交付封装 | 已形成稳定能力 | 高 | wrench | Agent |
+                    """
+                ).strip()
+                + "\n",
+                encoding="utf-8",
+            )
+            (vault_dir / ".persona-system" / "render-profile.json").write_text(
+                json.dumps(
+                    {
+                        "generation_context": {"target_scene": "job_jd"},
+                        "external_source_cards": [
+                            {
+                                "icon": "book",
+                                "title": "GitHub 公开资料",
+                                "summary": "OpenAI 公开主页与代表仓库摘要。",
+                                "meta": ["owner: openai"],
+                                "url": "https://github.com/openai",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            runner = module.CodexPersonaJobRunner(repo_root, repo_root)
+            render_profile = runner._enhance_persona_vault(
+                vault_dir,
+                {"agents": ["codex"], "links": [], "path_mappings": []},
+            )
+
+            self.assertEqual(len(render_profile["external_source_cards"]), 1)
+            self.assertEqual(render_profile["external_source_cards"][0]["title"], "GitHub 公开资料")
 
 
 if __name__ == "__main__":

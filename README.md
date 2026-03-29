@@ -55,6 +55,7 @@ cp .env.example .env.local
   - 通过浏览器收集 agent、多路径映射、外部链接和输出目录
   - 由本机 `codex exec --model gpt-5.4` 执行完整 PersonaVault 生成
   - 生成完成后会在同一流程里直接导出网页预览链接
+  - 对 `github` 类型链接，会先抓取公开主页与代表仓库摘要，再并入 PersonaVault 和网页预览
   - 成功态保留在首页，支持打开网页、打开 Obsidian，以及自然语言修改 / 重写
 
 ## 仓库结构

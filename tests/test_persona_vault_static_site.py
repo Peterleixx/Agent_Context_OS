@@ -333,6 +333,15 @@ class PersonaVaultStaticSiteTest(unittest.TestCase):
                     "public_summary": [
                         "擅长把复杂工作流转成可交付资产。"
                     ],
+                    "external_source_cards": [
+                        {
+                            "icon": "book",
+                            "title": "GitHub 公开资料",
+                            "summary": "OpenAI 公开主页与代表仓库摘要。",
+                            "meta": ["owner: openai", "languages: Python"],
+                            "url": "https://github.com/openai",
+                        }
+                    ],
                 },
                 ensure_ascii=False,
             ),
@@ -358,6 +367,8 @@ class PersonaVaultStaticSiteTest(unittest.TestCase):
         self.assertIn("岗位叙事重心", html)
         self.assertIn("Agent 工作流", html)
         self.assertIn("Agent交付封装", html)
+        self.assertIn("GitHub 公开资料", html)
+        self.assertIn("OpenAI 公开主页与代表仓库摘要", html)
         self.assertNotIn("No capability radar available.", html)
 
     def test_renderer_accepts_value_cards_with_summary_only(self):
