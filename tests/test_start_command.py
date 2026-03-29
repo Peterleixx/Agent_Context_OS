@@ -10,7 +10,7 @@ class StartCommandTest(unittest.TestCase):
         self.assertTrue(start_script.exists())
         content = start_script.read_text(encoding="utf-8")
         self.assertIn("./scripts/setup.sh", content)
-        self.assertIn("./scripts/run.sh", content)
+        self.assertIn("PERSONA_VAULT_OPEN_BROWSER=1 ./scripts/run.sh", content)
 
 
 if __name__ == "__main__":

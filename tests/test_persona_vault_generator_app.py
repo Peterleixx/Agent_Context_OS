@@ -54,6 +54,14 @@ class FakeOpener:
 
 
 class PersonaVaultGeneratorAppTest(unittest.TestCase):
+    def test_parse_args_supports_open_browser_flag(self):
+        module = load_generator_module()
+
+        args = module.parse_args(["--open-browser", "--port", "9999"])
+
+        self.assertTrue(args.open_browser)
+        self.assertEqual(args.port, 9999)
+
     def test_build_codex_command_uses_local_codex_exec(self):
         module = load_generator_module()
 

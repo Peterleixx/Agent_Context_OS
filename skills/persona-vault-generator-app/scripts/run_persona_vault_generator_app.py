@@ -9,6 +9,7 @@ import sys
 import tempfile
 import threading
 import uuid
+import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -19,12 +20,17 @@ from urllib.parse import urlparse
 DEFAULT_JOB_MESSAGE = "正在调用本机 Codex 执行 PersonaVault 生成任务"
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the local PersonaVault generator app.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--working-directory", default=os.getcwd())
-    return parser.parse_args()
+    parser.add_argument("--open-browser", action="store_true")
+    return parser.parse_args(argv)
+
+
+def open_browser(url: str) -> None:
+    webbrowser.open(url)
 
 
 def split_path_mappings(path_mappings: list[dict[str, Any]]) -> dict[str, list[str]]:
@@ -466,6 +472,8 @@ def main() -> int:
     )
     url = f"http://{args.host}:{server.server_address[1]}"
     print(url, flush=True)
+    if args.open_browser:
+        threading.Timer(0.2, open_browser, args=(url,)).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
