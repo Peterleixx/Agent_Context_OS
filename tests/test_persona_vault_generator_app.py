@@ -32,12 +32,15 @@ class FakeRunner:
         self.last_payload = None
         self.last_edit = None
         self.last_deploy = None
+        self.last_chat_history = None
+        self.last_chat_send = None
         self.last_retry = None
         self.job = {
             "job_id": "job_test",
             "status": "running",
             "stage": "running_codex",
             "message": "正在调用本机 Codex 执行 PersonaVault 生成任务",
+            "openclaw_suggested_agent_id": "persona-vault-demo",
             "retry_available": False,
             "retry_label": None,
         }
@@ -50,9 +53,33 @@ class FakeRunner:
         self.last_edit = {"job_id": job_id, "instruction": instruction}
         return "job_edit"
 
-    def start_deploy_job(self, job_id):
-        self.last_deploy = {"job_id": job_id}
+    def start_deploy_job(self, job_id, agent_id=None):
+        self.last_deploy = {"job_id": job_id, "agent_id": agent_id}
         return "job_deploy"
+
+    def load_openclaw_chat_history(self, agent_id):
+        self.last_chat_history = {"agent_id": agent_id}
+        return {
+            "agent_id": agent_id,
+            "sessionKey": f"agent:{agent_id}:main",
+            "thinkingLevel": "low",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "你好，我已准备好。"}],
+                    "timestamp": 1774770367214,
+                }
+            ],
+        }
+
+    def send_openclaw_chat_message(self, agent_id, message):
+        self.last_chat_send = {"agent_id": agent_id, "message": message}
+        return {
+            "ok": True,
+            "agent_id": agent_id,
+            "sessionKey": f"agent:{agent_id}:main",
+            "message": message,
+        }
 
     def retry_job(self, job_id):
         self.last_retry = {"job_id": job_id}
@@ -573,6 +600,38 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
         self.assertIn("Agent 工作流", payload["identity_card"])
         self.assertEqual(payload["source_snapshot"]["vault_path"], str(vault_dir))
 
+    def test_refresh_persona_outputs_sets_openclaw_suggested_agent_id(self):
+        module = load_generator_module()
+        repo_root = Path(__file__).resolve().parents[1]
+        runner = module.CodexPersonaJobRunner(repo_root, repo_root)
+        vault_dir = self._create_demo_vault()
+        profile_path = vault_dir / "00 - Profile" / "主要人物画像.md"
+        runner._jobs["job_refresh"] = module.JobState("job_refresh")
+
+        refreshed = runner._refresh_persona_outputs(
+            "job_refresh",
+            vault_dir,
+            profile_path,
+            {
+                "agents": ["codex"],
+                "path_mappings": [],
+                "links": [],
+                "output_dir": str(vault_dir),
+                "advanced_settings": {
+                    "target_scene": "job_jd",
+                    "job_jd_text": "",
+                    "focus_presets": [],
+                    "focus_custom": "",
+                    "redaction_profile": "conservative",
+                    "redaction_custom_rules": "",
+                },
+            },
+        )
+
+        self.assertTrue(refreshed)
+        job = runner.get_job("job_refresh")
+        self.assertEqual(job["openclaw_suggested_agent_id"], "persona-vault-deploy")
+
     def test_resolve_unique_agent_id_appends_suffix_when_workspace_exists(self):
         module = load_generator_module()
 
@@ -685,6 +744,95 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
         self.assertTrue((workspace / "USER.md").exists())
         self.assertTrue((workspace / "IDENTITY.md").exists())
         self.assertTrue((workspace / "PERSONA_VAULT_SOURCE.md").exists())
+
+    def test_run_deploy_job_uses_explicit_agent_id_and_sets_chat_url(self):
+        module = load_generator_module()
+        repo_root = Path(__file__).resolve().parents[1]
+        runner = module.CodexPersonaJobRunner(repo_root, repo_root)
+        vault_dir = self._create_demo_vault()
+        runner._enhance_persona_vault(
+            vault_dir,
+            {
+                "agents": ["codex"],
+                "path_mappings": [],
+                "links": [],
+                "output_dir": str(vault_dir),
+                "advanced_settings": {
+                    "target_scene": "job_jd",
+                    "job_jd_text": "",
+                    "focus_presets": [],
+                    "focus_custom": "",
+                    "redaction_profile": "conservative",
+                    "redaction_custom_rules": "",
+                },
+            },
+        )
+
+        runner._jobs["job_explicit"] = module.JobState("job_explicit")
+        runner._jobs["job_explicit"].openclaw_requested_agent_id = "Beta Agent"
+        commands = []
+
+        def fake_checked(command, cwd):
+            commands.append(command)
+            return mock.Mock(returncode=0, stdout='{"ok":true}', stderr="")
+
+        fake_home = Path(tempfile.mkdtemp(prefix="fake-openclaw-home-"))
+
+        with (
+            mock.patch.object(module.Path, "home", return_value=fake_home),
+            mock.patch.object(module.shutil, "which", return_value="/usr/local/bin/openclaw"),
+            mock.patch.object(runner, "_run_checked_command", side_effect=fake_checked),
+            mock.patch.object(
+                module.subprocess,
+                "run",
+                return_value=mock.Mock(returncode=1, stdout="", stderr="gateway down"),
+            ),
+        ):
+            runner._run_deploy_job("job_explicit", vault_dir)
+
+        job = runner.get_job("job_explicit")
+        self.assertEqual(job["status"], "completed")
+        self.assertEqual(job["openclaw_agent_id"], "beta-agent")
+        self.assertEqual(job["openclaw_chat_url"], "/chat?agent_id=beta-agent")
+        self.assertEqual(commands[1][3], "beta-agent")
+
+    def test_run_deploy_job_fails_when_explicit_agent_id_conflicts(self):
+        module = load_generator_module()
+        repo_root = Path(__file__).resolve().parents[1]
+        runner = module.CodexPersonaJobRunner(repo_root, repo_root)
+        vault_dir = self._create_demo_vault()
+        runner._enhance_persona_vault(
+            vault_dir,
+            {
+                "agents": ["codex"],
+                "path_mappings": [],
+                "links": [],
+                "output_dir": str(vault_dir),
+                "advanced_settings": {
+                    "target_scene": "job_jd",
+                    "job_jd_text": "",
+                    "focus_presets": [],
+                    "focus_custom": "",
+                    "redaction_profile": "conservative",
+                    "redaction_custom_rules": "",
+                },
+            },
+        )
+        runner._jobs["job_conflict"] = module.JobState("job_conflict")
+        runner._jobs["job_conflict"].openclaw_requested_agent_id = "beta agent"
+
+        fake_home = Path(tempfile.mkdtemp(prefix="fake-openclaw-home-"))
+        (fake_home / ".openclaw" / "workspace-beta-agent").mkdir(parents=True)
+
+        with mock.patch.object(module.shutil, "which", return_value="/usr/local/bin/openclaw"), mock.patch.object(
+            module.Path, "home", return_value=fake_home
+        ):
+            runner._run_deploy_job("job_conflict", vault_dir)
+
+        job = runner.get_job("job_conflict")
+        self.assertEqual(job["status"], "failed")
+        self.assertIn("beta-agent", job["message"])
+        self.assertIn("已存在", job["message"])
 
     def test_run_deploy_job_fails_when_openclaw_missing(self):
         module = load_generator_module()
@@ -848,7 +996,7 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
 
             deploy_request = urllib.request.Request(
                 f"{base_url}/api/deploy-openclaw",
-                data=json.dumps({"job_id": "job_test"}).encode("utf-8"),
+                data=json.dumps({"job_id": "job_test", "agent_id": "My Beta Agent"}).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
@@ -857,6 +1005,7 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
             )
             self.assertEqual(deploy_response["job_id"], "job_deploy")
             self.assertEqual(runner.last_deploy["job_id"], "job_test")
+            self.assertEqual(runner.last_deploy["agent_id"], "My Beta Agent")
 
             retry_request = urllib.request.Request(
                 f"{base_url}/api/retry",
@@ -917,6 +1066,43 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
                 httpd.server_close()
                 thread.join(timeout=2)
 
+    def test_http_server_exposes_chat_page_and_chat_endpoints(self):
+        module = load_generator_module()
+        repo_root = Path(__file__).resolve().parents[1]
+        runner = FakeRunner()
+        opener = FakeOpener()
+        httpd = module.create_server("127.0.0.1", 0, repo_root, runner, opener, opener, repo_root)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        base_url = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+        try:
+            chat_html = urllib.request.urlopen(f"{base_url}/chat?agent_id=beta-agent").read().decode("utf-8")
+            self.assertIn("beta-agent", chat_html)
+            self.assertIn("/api/openclaw-chat/history", chat_html)
+            self.assertIn("/api/openclaw-chat/send", chat_html)
+
+            history = json.loads(
+                urllib.request.urlopen(f"{base_url}/api/openclaw-chat/history?agent_id=beta-agent").read().decode("utf-8")
+            )
+            self.assertEqual(history["agent_id"], "beta-agent")
+            self.assertEqual(runner.last_chat_history["agent_id"], "beta-agent")
+
+            send_request = urllib.request.Request(
+                f"{base_url}/api/openclaw-chat/send",
+                data=json.dumps({"agent_id": "beta-agent", "message": "你好"}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            send_response = json.loads(urllib.request.urlopen(send_request).read().decode("utf-8"))
+            self.assertTrue(send_response["ok"])
+            self.assertEqual(runner.last_chat_send["agent_id"], "beta-agent")
+            self.assertEqual(runner.last_chat_send["message"], "你好")
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=2)
+
     def test_index_endpoint_renders_effective_codex_runtime_config(self):
         module = load_generator_module()
         repo_root = Path(__file__).resolve().parents[1]
@@ -960,8 +1146,13 @@ class PersonaVaultGeneratorAppTest(unittest.TestCase):
         self.assertIn("打开网页预览", html)
         self.assertIn("自然语言修改 / 重写", html)
         self.assertIn("部署分身 Agent", html)
+        self.assertIn("agent-id-input", html)
+        self.assertIn("立即对话", html)
+        self.assertIn("/chat?agent_id=", html)
         self.assertIn("/api/edit", html)
         self.assertIn("/api/deploy-openclaw", html)
+        self.assertIn("/api/openclaw-chat/history", html)
+        self.assertIn("/api/openclaw-chat/send", html)
         self.assertNotIn("即将跳转到网页预览", html)
         self.assertNotIn("pendingRedirect = setTimeout", html)
 

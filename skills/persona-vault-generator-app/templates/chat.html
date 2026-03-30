@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenClaw Chat</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body class="min-h-screen bg-[radial-gradient(circle_at_top,_#fde68a,_#fafaf9_35%,_#e7e5e4_100%)] text-stone-900">
+    <main class="mx-auto flex min-h-screen max-w-4xl flex-col px-6 py-8 md:px-8">
+      <section class="rounded-[1.75rem] border border-stone-200 bg-white/92 p-6 shadow-[0_30px_80px_rgba(28,25,23,0.08)]">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div class="text-xs font-semibold uppercase tracking-[0.26em] text-amber-700">OpenClaw Chat</div>
+            <h1 class="mt-2 text-2xl font-semibold">正在和龙虾分身对话</h1>
+            <p class="mt-2 text-sm text-stone-600">
+              当前 Agent ID:
+              <span id="agent-id-label" class="font-medium text-stone-900">__CHAT_AGENT_ID__</span>
+            </p>
+          </div>
+          <div id="chat-status" class="rounded-full border border-stone-200 bg-stone-50 px-3 py-2 text-xs text-stone-600">正在连接本地服务</div>
+        </div>
+      </section>
+
+      <section class="mt-6 flex min-h-0 flex-1 flex-col rounded-[1.75rem] border border-stone-200 bg-white/92 p-5 shadow-sm">
+        <div id="chat-error" class="hidden rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800"></div>
+        <div id="chat-messages" class="mt-3 flex-1 space-y-3 overflow-y-auto rounded-[1.5rem] bg-stone-50 px-4 py-4"></div>
+        <form id="chat-form" class="mt-4 flex gap-3">
+          <textarea
+            id="chat-input"
+            rows="3"
+            placeholder="输入你想对这个龙虾说的话"
+            class="min-h-[88px] flex-1 rounded-[1.25rem] border border-stone-200 bg-white px-4 py-3 text-sm text-stone-800 outline-none transition focus:border-stone-400"
+          ></textarea>
+          <button
+            id="chat-send"
+            type="submit"
+            class="self-end rounded-full bg-stone-900 px-5 py-3 text-sm font-medium text-white transition hover:bg-stone-700"
+          >
+            发送
+          </button>
+        </form>
+      </section>
+    </main>
+
+    <script>
+      const agentId = "__CHAT_AGENT_ID__";
+      const historyEndpoint = "/api/openclaw-chat/history";
+      const sendEndpoint = "/api/openclaw-chat/send";
+      const messagesNode = document.getElementById("chat-messages");
+      const form = document.getElementById("chat-form");
+      const input = document.getElementById("chat-input");
+      const sendButton = document.getElementById("chat-send");
+      const errorNode = document.getElementById("chat-error");
+      const statusNode = document.getElementById("chat-status");
+      let pollTimer = null;
+
+      function messageText(message) {
+        const content = Array.isArray(message.content) ? message.content : [];
+        return content
+          .map((item) => item && (item.text || item.thinking || ""))
+          .filter(Boolean)
+          .join("\n")
+          .trim();
+      }
+
+      function renderMessages(messages) {
+        messagesNode.innerHTML = "";
+        for (const message of messages) {
+          const text = messageText(message);
+          if (!text) continue;
+          const row = document.createElement("div");
+          const isUser = message.role === "user";
+          row.className = `rounded-[1.2rem] px-4 py-3 text-sm leading-7 ${isUser ? "bg-stone-900 text-white" : "bg-white text-stone-800 border border-stone-200"}`;
+          row.textContent = text;
+          messagesNode.appendChild(row);
+        }
+        messagesNode.scrollTop = messagesNode.scrollHeight;
+      }
+
+      function showError(message) {
+        errorNode.textContent = message;
+        errorNode.classList.remove("hidden");
+      }
+
+      function clearError() {
+        errorNode.textContent = "";
+        errorNode.classList.add("hidden");
+      }
+
+      async function loadHistory() {
+        const response = await fetch(`${historyEndpoint}?agent_id=${encodeURIComponent(agentId)}`);
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.message || "无法加载聊天记录。");
+        }
+        renderMessages(Array.isArray(data.messages) ? data.messages : []);
+        statusNode.textContent = `会话: ${data.sessionKey || `agent:${agentId}:main`}`;
+      }
+
+      async function refreshHistory() {
+        try {
+          await loadHistory();
+          clearError();
+        } catch (error) {
+          showError(error.message || String(error));
+          statusNode.textContent = "加载失败";
+        }
+      }
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const message = input.value.trim();
+        if (!message) return;
+        clearError();
+        sendButton.disabled = true;
+        input.disabled = true;
+        statusNode.textContent = "正在回复";
+        try {
+          const response = await fetch(sendEndpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ agent_id: agentId, message }),
+          });
+          const data = await response.json();
+          if (!response.ok) {
+            throw new Error(data.message || "发送失败。");
+          }
+          input.value = "";
+          await loadHistory();
+          statusNode.textContent = data.sessionKey || `agent:${agentId}:main`;
+        } catch (error) {
+          showError(error.message || String(error));
+          statusNode.textContent = "发送失败";
+        } finally {
+          sendButton.disabled = false;
+          input.disabled = false;
+          input.focus();
+        }
+      });
+
+      refreshHistory();
+      pollTimer = window.setInterval(refreshHistory, 2000);
+      window.addEventListener("beforeunload", () => {
+        if (pollTimer) {
+          clearInterval(pollTimer);
+        }
+      });
+    </script>
+  </body>
+</html>

@@ -232,6 +232,19 @@
                 <div class="mt-4 font-medium text-stone-900">网页预览地址</div>
                 <div id="site-url" class="mt-2 break-all"></div>
               </div>
+              <section class="mt-5 rounded-2xl border border-amber-200/70 bg-white px-4 py-4 text-sm text-stone-700">
+                <div class="font-medium text-stone-900">OpenClaw 部署配置</div>
+                <label class="mt-3 block text-sm font-medium text-stone-900" for="agent-id-input">部署 Agent ID</label>
+                <input
+                  id="agent-id-input"
+                  type="text"
+                  placeholder="例如：beta-agent"
+                  class="mt-2 w-full rounded-[1.05rem] border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-800 outline-none transition focus:border-stone-400 focus:bg-white"
+                />
+                <p class="mt-2 text-xs leading-6 text-stone-500">
+                  规则：自动转小写，只保留 `a-z`、`0-9`，其他字符会归一化为 `-`。如果该 ID 已存在，部署会直接报冲突。
+                </p>
+              </section>
               <div class="mt-5 flex flex-wrap gap-3">
                 <button
                   type="button"
@@ -278,6 +291,13 @@
                     class="inline-flex items-center rounded-full bg-stone-900 px-5 py-3 text-sm font-medium text-white transition hover:bg-stone-700"
                   >
                     打开 workspace
+                  </button>
+                  <button
+                    type="button"
+                    id="open-chat-window"
+                    class="hidden inline-flex items-center rounded-full bg-amber-700 px-5 py-3 text-sm font-medium text-white transition hover:bg-amber-600"
+                  >
+                    立即对话
                   </button>
                   <a
                     id="openclaw-docs-link"
@@ -399,17 +419,21 @@
       const openSiteButton = document.getElementById("open-site");
       const openObsidianButton = document.getElementById("open-obsidian");
       const deployOpenClawButton = document.getElementById("deploy-openclaw");
+      const agentIdInput = document.getElementById("agent-id-input");
       const deployResultSection = document.getElementById("deploy-result-section");
       const openClawAgentIdNode = document.getElementById("openclaw-agent-id");
       const openClawWorkspacePathNode = document.getElementById("openclaw-workspace-path");
       const openClawGatewayStatusNode = document.getElementById("openclaw-gateway-status");
       const openWorkspaceButton = document.getElementById("open-workspace");
+      const openChatWindowButton = document.getElementById("open-chat-window");
       const openClawDocsLink = document.getElementById("openclaw-docs-link");
       const editInstructionNode = document.getElementById("edit-instruction");
       const submitEditButton = document.getElementById("submit-edit");
       const editHintNode = document.getElementById("edit-hint");
       const advancedSettingsNode = document.getElementById("advanced-settings");
       const advancedSettingsIndicator = document.getElementById("advanced-settings-indicator");
+      const openClawChatHistoryEndpoint = "/api/openclaw-chat/history";
+      const openClawChatSendEndpoint = "/api/openclaw-chat/send";
       let currentJob = null;
 
       function appendTemplate(container, template) {
@@ -440,12 +464,17 @@
         const hasDeployData = Boolean(data.openclaw_agent_id && data.openclaw_workspace_path);
         deployResultSection.classList.toggle("hidden", !hasDeployData);
         if (!hasDeployData) {
+          openChatWindowButton.classList.add("hidden");
+          openChatWindowButton.dataset.chatUrl = "";
           return;
         }
         openClawAgentIdNode.textContent = data.openclaw_agent_id || "";
         openClawWorkspacePathNode.textContent = data.openclaw_workspace_path || "";
         openClawGatewayStatusNode.textContent = "gateway 已完成启动/重启";
         openClawDocsLink.href = data.openclaw_docs_url || "https://docs.openclaw.ai/start/openclaw";
+        const chatUrl = data.openclaw_chat_url || `/chat?agent_id=${encodeURIComponent(data.openclaw_agent_id || "")}`;
+        openChatWindowButton.dataset.chatUrl = chatUrl;
+        openChatWindowButton.classList.toggle("hidden", !data.openclaw_agent_id);
       }
 
       function updateRetryPanel(data) {
@@ -471,6 +500,11 @@
           vaultPathNode.textContent = data.vault_path || "";
           profilePathNode.textContent = data.profile_path || "";
           siteUrlNode.textContent = data.site_url || "";
+          if (data.openclaw_agent_id) {
+            agentIdInput.value = data.openclaw_agent_id;
+          } else if (data.openclaw_suggested_agent_id) {
+            agentIdInput.value = data.openclaw_suggested_agent_id;
+          }
           editHintNode.textContent = "修改完成后会重新生成网页链接和当前页展示内容。";
           updateDeployPanel(data);
           updateRetryPanel(null);
@@ -566,13 +600,22 @@
         }
       });
 
+      openChatWindowButton.addEventListener("click", () => {
+        const chatUrl = openChatWindowButton.dataset.chatUrl;
+        if (!chatUrl) return;
+        window.open(chatUrl, "_blank", "noopener");
+      });
+
       deployOpenClawButton.addEventListener("click", async () => {
         if (!currentJob) return;
         const sourceJobId = currentJob.source_job_id || currentJob.job_id;
         const response = await fetch("/api/deploy-openclaw", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ job_id: sourceJobId }),
+          body: JSON.stringify({
+            job_id: sourceJobId,
+            agent_id: agentIdInput.value.trim(),
+          }),
         });
         const data = await response.json();
         if (!response.ok) {
